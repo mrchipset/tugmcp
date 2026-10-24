@@ -303,7 +303,8 @@ Status McpServer::run() {
               auto request_id =
                   RequestId::fromJson(decoded.value().params.at("requestId"));
               if (request_id.hasValue()) {
-                const std::string suffix = request_id.value().toJson().dump();
+                const std::string suffix =
+                    "\x1f" + request_id.value().toJson().dump();
                 const std::string session_prefix =
                     metadata.sessionId + "\x1f";
                 std::vector<std::shared_ptr<CancellationToken>> tokens;

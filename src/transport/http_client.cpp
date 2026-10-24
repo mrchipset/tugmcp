@@ -424,8 +424,10 @@ public:
       }
     }
 
+    std::string protocol_version;
     {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      protocol_version = options_.protocolVersion;
       if (closed_) {
         return Status::failure(
             reasonError("transport is closed", "network_error"));
@@ -459,8 +461,8 @@ public:
 
     httplib::Headers headers;
     headers.emplace("Accept", "application/json, text/event-stream");
-    headers.emplace("MCP-Protocol-Version", options_.protocolVersion);
-    if (options_.protocolVersion == "2025-11-25") {
+    headers.emplace("MCP-Protocol-Version", protocol_version);
+    if (protocol_version == "2025-11-25") {
       std::string session;
       {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -471,7 +473,7 @@ public:
       }
     }
 
-    if (options_.protocolVersion == "2026-07-28" &&
+    if (protocol_version == "2026-07-28" &&
         message.contains("method") && message.at("method").is_string()) {
       const std::string method = message.at("method").get<std::string>();
       headers.emplace("Mcp-Method", method);
@@ -489,7 +491,7 @@ public:
     }
 
     Json document = message;
-    if (options_.protocolVersion == "2026-07-28" &&
+    if (protocol_version == "2026-07-28" &&
         document.contains("method") && document.at("method").is_string()) {
       if (!document.contains("params") ||
           !document.at("params").is_object()) {
@@ -501,7 +503,7 @@ public:
       }
       Json& meta = params["_meta"];
       if (!meta.contains("protocolVersion")) {
-        meta["protocolVersion"] = options_.protocolVersion;
+        meta["protocolVersion"] = protocol_version;
       }
     }
 
@@ -665,8 +667,16 @@ public:
         finished = std::move(stream_thread_);
       }
       stream_stop_.store(false, std::memory_order_release);
+      stream_running_.store(false, std::memory_order_release);
+      try {
+        stream_thread_ =
+            std::thread([this, session] { streamLoop(session); });
+      } catch (...) {
+        return Status::failure(McpError::make(
+            ErrorCode::InternalError, "failed to start stream thread",
+            Json{{"reason", "network_error"}}));
+      }
       stream_running_.store(true, std::memory_order_release);
-      stream_thread_ = std::thread([this, session] { streamLoop(session); });
     }
     if (finished.joinable()) {
       finished.join();

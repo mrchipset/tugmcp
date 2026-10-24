@@ -56,7 +56,10 @@ public:
 
   // Best-effort abort of transport work for the given request. This is the
   // CloseStream cancellation path: it must not block and may be a no-op for
-  // transports that cannot interrupt an in-flight send.
+  // transports that cannot interrupt an in-flight send. For stateless 2026
+  // there is no session to scope notifications/cancelled; the library never
+  // sends it in 2026 (Auto maps to CloseStream), and server-side matching is
+  // best-effort by id across routes.
   virtual void cancelPending(const RequestId&) {}
 
   // Whether this transport can open per-request server streams (SSE).

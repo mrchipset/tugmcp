@@ -247,10 +247,9 @@ public:
 
   Status sendToSession(std::string_view sessionId, const Json& message) {
     sweepSessions();
-    std::shared_ptr<GetStream> stream;
     ReplayEvent event;
     {
-      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      std::lock_guard<std::mutex> session_lock(sessions_mutex_);
       const auto it = sessions_.find(std::string(sessionId));
       if (it == sessions_.end() || !it->second->stream) {
         return Status::failure(McpError::make(
@@ -261,27 +260,19 @@ public:
       event.id = session->next_event_id++;
       event.message = message;
       session->last_seen = now();
-      stream = session->stream;
-    }
-    {
-      std::lock_guard<std::mutex> lock(stream->mutex);
-      if (stream->closed) {
+
+      std::lock_guard<std::mutex> stream_lock(session->stream->mutex);
+      if (session->stream->closed) {
         return Status::failure(McpError::make(
             ErrorCode::InternalError, "no session stream",
             Json{{"reason", "no_session_stream"}}));
       }
-      stream->frames.push_back(event);
-      stream->cv.notify_all();
-    }
-    {
-      std::lock_guard<std::mutex> lock(sessions_mutex_);
-      const auto it = sessions_.find(std::string(sessionId));
-      if (it != sessions_.end()) {
-        it->second->replay.push_back(event);
-        while (it->second->replay.size() > 256) {
-          it->second->replay.pop_front();
-        }
+      session->stream->frames.push_back(event);
+      session->replay.push_back(event);
+      while (session->replay.size() > 256) {
+        session->replay.pop_front();
       }
+      session->stream->cv.notify_all();
     }
     return Status::success();
   }

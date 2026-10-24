@@ -686,14 +686,126 @@ TEST_CASE("2025 per-call timeout notifies the server") {
   REQUIRE(client.connect().ok);
 
   CallOptions call_options;
-  call_options.timeout = std::chrono::milliseconds(100);
-  auto timed_out = client.callTool("slow", Json::object(), call_options);
+  call_options.timeout = std::chrono::milliseconds(500);
+  std::optional<Result<Json>> outcome;
+  std::thread caller([&] {
+    outcome = client.callTool("slow", Json::object(), call_options);
+  });
   entered_future.wait();
-  REQUIRE_FALSE(timed_out.hasValue());
-  CHECK(timed_out.error().data.at("reason") == "timeout");
+  caller.join();
+  REQUIRE(outcome.has_value());
+  REQUIRE_FALSE(outcome->hasValue());
+  CHECK(outcome->error().data.at("reason") == "timeout");
   CHECK(observed_future.wait_for(std::chrono::seconds(2)) ==
         std::future_status::ready);
 
+  client.close();
+  running.stop();
+}
+TEST_CASE("cancel id 1 does not cancel id 11 in the same session") {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  RunningServer running(options);
+  std::atomic<bool> a_observed{false};
+  std::atomic<bool> b_cancelled{false};
+  std::promise<void> a_entered;
+  auto a_entered_future = a_entered.get_future();
+  std::promise<void> b_entered;
+  auto b_entered_future = b_entered.get_future();
+  std::promise<void> release_b;
+  auto release_b_future = release_b.get_future();
+  addTool(running.server(), "block-a",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            a_entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            a_observed.store(true);
+            return textOutcome("a");
+          });
+  addTool(running.server(), "block-b",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            b_entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              if (release_b_future.wait_for(std::chrono::milliseconds(0)) ==
+                  std::future_status::ready) {
+                break;
+              }
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (context.cancellation && context.cancellation->cancelled()) {
+              b_cancelled.store(true);
+            }
+            return textOutcome("b");
+          });
+  running.start();
+
+  auto client_storage = makeClient(running.port());
+  McpClient& client = *client_storage;
+  REQUIRE(client.connect().ok);
+  const std::string session_id = client.sessionId();
+  REQUIRE_FALSE(session_id.empty());
+
+  auto raw_call = [&](int id, const std::string& tool, int& status,
+                      std::string& body) {
+    httplib::Client raw(baseUrlFor(running.port()));
+    httplib::Headers headers;
+    headers.emplace("MCP-Protocol-Version", "2025-11-25");
+    headers.emplace("MCP-Session-Id", session_id);
+    headers.emplace("Accept", "application/json");
+    const Json request = Json{{"jsonrpc", "2.0"},
+                              {"id", id},
+                              {"method", "tools/call"},
+                              {"params", Json{{"name", tool},
+                                              {"arguments", Json::object()}}}};
+    auto response = raw.Post("/mcp", headers, request.dump(),
+                             "application/json");
+    status = response ? response->status : -1;
+    body = response ? response->body : std::string{};
+    raw.stop();
+  };
+
+  int status_a = 0;
+  int status_b = 0;
+  std::string body_a;
+  std::string body_b;
+  std::thread caller_a([&] { raw_call(1, "block-a", status_a, body_a); });
+  a_entered_future.wait();
+  std::thread caller_b([&] { raw_call(11, "block-b", status_b, body_b); });
+  b_entered_future.wait();
+
+  httplib::Client raw(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("MCP-Session-Id", session_id);
+  const Json cancel = Json{{"jsonrpc", "2.0"},
+                           {"method", "notifications/cancelled"},
+                           {"params", Json{{"requestId", 1},
+                                           {"reason", "cancelled"}}}};
+  auto cancelled = raw.Post("/mcp", headers, cancel.dump(),
+                            "application/json");
+  REQUIRE(cancelled);
+  CHECK(cancelled->status == 202);
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!a_observed.load() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  CHECK(a_observed.load());
+  release_b.set_value();
+  caller_a.join();
+  caller_b.join();
+
+  CHECK_FALSE(b_cancelled.load());
+  CHECK(status_b == 200);
+  CHECK(Json::parse(body_b).at("result").at("content").at(0).at("text") ==
+        "b");
+
+  raw.stop();
   client.close();
   running.stop();
 }
