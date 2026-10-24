@@ -18,6 +18,7 @@ namespace v1 {
 struct MessageMetadata {
   std::string protocolVersion;
   std::string route;
+  bool emergency = false;
 };
 
 using MessageHandlerEx = std::function<void(Json, const MessageMetadata&)>;
@@ -47,6 +48,13 @@ public:
   // CloseStream cancellation path: it must not block and may be a no-op for
   // transports that cannot interrupt an in-flight send.
   virtual void cancelPending(const RequestId&) {}
+
+  // Whether this transport can open per-request server streams (SSE).
+  virtual bool supportsStreaming() const { return false; }
+
+  // Optional notification that a transport route is gone. Single-route
+  // transports may leave this unset.
+  virtual void setOnRouteClosed(std::function<void(const std::string&)>) {}
 
   // Strict JSON text convenience path. The default validates the text and
   // forwards to send(); transports may override it to preserve raw bytes.

@@ -132,13 +132,15 @@ Status McpServer::run() {
   config.serverName = options_.name;
   config.serverVersion = options_.version;
   config.instructions = options_.instructions;
+  config.supportsSubscriptions = transport_->supportsStreaming();
   // Declared before the cleanup guard so queued tasks always see a live
   // dispatcher: guard cleanup drains the executor before this object dies.
   Dispatcher dispatcher(tools_, options_.resources.get(),
                         options_.prompts.get(), std::move(config));
 
   bool cleaned = false;
-  auto cleanup = [this, &cleaned]() noexcept {
+  bool did_start = false;
+  auto cleanup = [this, &cleaned, &did_start]() noexcept {
     if (cleaned) {
       return;
     }
@@ -150,7 +152,7 @@ Status McpServer::run() {
     }
     cv_.notify_all();
     try {
-      if (options_.executor) {
+      if (did_start && options_.executor) {
         options_.executor->drain();
       }
     } catch (...) {
@@ -167,6 +169,7 @@ Status McpServer::run() {
     } catch (...) {
     }
     try {
+      transport_->setOnRouteClosed(nullptr);
       transport_->setOnMessageEx(nullptr);
       transport_->setOnMessage(nullptr);
       transport_->setOnError(nullptr);
@@ -279,17 +282,17 @@ Status McpServer::run() {
                   send_response(metadata.route, response);
                 };
 
-            if (metadata.protocolVersion != "2026-07-28") {
-              send_listen_error(ErrorCode::MethodNotFound,
-                                "subscriptions/listen requires 2026-07-28",
-                                std::nullopt);
-              return;
-            }
             if (metadata.route.empty()) {
               send_listen_error(
                   ErrorCode::InternalError,
                   "subscriptions require a streaming transport",
                   std::string("subscriptions_require_stream"));
+              return;
+            }
+            if (metadata.protocolVersion != "2026-07-28") {
+              send_listen_error(ErrorCode::MethodNotFound,
+                                "subscriptions/listen requires 2026-07-28",
+                                std::nullopt);
               return;
             }
 
@@ -347,11 +350,13 @@ Status McpServer::run() {
 
           const bool is_request = message.kind == MessageKind::Request;
           const RequestId request_id = message.id;
+          const std::string token_key =
+              metadata.route + "\x1f" + request_id.toJson().dump();
           std::shared_ptr<CancellationToken> token =
               std::make_shared<CancellationToken>();
           if (is_request) {
             std::lock_guard<std::mutex> lock(mutex_);
-            cancellation_tokens_[request_id] = token;
+            cancellation_tokens_[token_key] = token;
           }
 
           {
@@ -367,12 +372,12 @@ Status McpServer::run() {
             cv_.notify_all();
           };
 
-          auto erase_token = [this, is_request, request_id, token] {
+          auto erase_token = [this, is_request, token_key, token] {
             if (!is_request) {
               return;
             }
             std::lock_guard<std::mutex> lock(mutex_);
-            const auto it = cancellation_tokens_.find(request_id);
+            const auto it = cancellation_tokens_.find(token_key);
             if (it != cancellation_tokens_.end() && it->second == token) {
               cancellation_tokens_.erase(it);
             }
@@ -433,7 +438,8 @@ Status McpServer::run() {
           }
 
           const ExecutorSubmitResult submitted = executor->post(
-              std::move(dispatch_and_send), Priority::Normal);
+              std::move(dispatch_and_send),
+              metadata.emergency ? Priority::Emergency : Priority::Normal);
           if (submitted) {
             return;
           }
@@ -470,10 +476,14 @@ Status McpServer::run() {
       cv_.notify_all();
     });
 
+    transport_->setOnRouteClosed(
+        [this](const std::string& route) { handleRouteClosed(route); });
+
     Status started = transport_->start();
     if (!started) {
       return started;
     }
+    did_start = true;
 
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -593,6 +603,42 @@ void McpServer::notifyListChanged(ListKind kind) {
         last_error_ = sent.error;
       }
       removeSubscription(subscription.id);
+    }
+  }
+}
+
+std::size_t McpServer::activeSubscriptions() const {
+  std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+  return subscriptions_.size();
+}
+
+void McpServer::handleRouteClosed(const std::string& route) {
+  std::vector<std::shared_ptr<CancellationToken>> tokens;
+  const std::string prefix = route + "\x1f";
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = cancellation_tokens_.begin();
+         it != cancellation_tokens_.end();) {
+      if (it->first.compare(0, prefix.size(), prefix) == 0) {
+        tokens.push_back(it->second);
+        it = cancellation_tokens_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (const auto& token : tokens) {
+    token->cancel();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+    for (auto it = subscriptions_.begin(); it != subscriptions_.end();) {
+      if (it->second.route == route) {
+        it = subscriptions_.erase(it);
+      } else {
+        ++it;
+      }
     }
   }
 }

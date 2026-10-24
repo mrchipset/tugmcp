@@ -42,16 +42,15 @@ bool isSupported(const DispatchConfig& config, const std::string& version) {
 Json capabilities(const DispatchConfig& config,
                   const IResourceProvider* resources,
                   const IPromptProvider* prompts, bool is2026) {
-  (void)config;  Json value;
-  value["tools"] = Json::object();
+  Json value;
+  value["tools"] = Json{{"listChanged", true}};
   if (resources != nullptr) {
-    value["resources"] =
-        Json{{"listChanged", true}, {"subscribe", true}};
+    value["resources"] = Json{{"listChanged", true}};
   }
   if (prompts != nullptr) {
     value["prompts"] = Json{{"listChanged", true}};
   }
-  if (is2026 && resources != nullptr) {
+  if (is2026 && config.supportsSubscriptions) {
     value["subscriptions"] = Json::object();
   }
   return value;
@@ -66,28 +65,58 @@ Json descriptorToJson(const ToolDescriptor& descriptor) {
   if (!descriptor.outputSchema.is_null()) {
     value["outputSchema"] = descriptor.outputSchema;
   }
-  if (!descriptor.annotations.is_null()) {
-    value["annotations"] = descriptor.annotations;
-  }
   if (descriptor.idempotent) {
-    value["idempotent"] = true;
+    Json annotations = descriptor.annotations.is_object()
+                           ? descriptor.annotations
+                           : Json::object();
+    annotations["idempotent"] = true;
+    value["annotations"] = std::move(annotations);
+  } else if (!descriptor.annotations.is_null()) {
+    value["annotations"] = descriptor.annotations;
   }
   return value;
 }
 
-Json contentBlockToJson(const ContentBlock& block) {
+Result<Json> contentBlockToJson(const ContentBlock& block) {
   Json item;
-  item["type"] = block.type;
-  item["text"] = block.text;
-  if (!block.mimeType.empty()) {
-    item["mimeType"] = block.mimeType;
-  }
-  if (!block.dataBase64.empty()) {
+  item["type"] = std::string(toString(block.type));
+
+  switch (block.type) {
+  case ContentType::Text:
+    item["text"] = block.text;
+    break;
+  case ContentType::Image:
+  case ContentType::Audio:
     item["data"] = block.dataBase64;
-  }
-  if (!block.uri.empty()) {
+    item["mimeType"] = block.mimeType;
+    break;
+  case ContentType::ResourceLink:
     item["uri"] = block.uri;
+    item["name"] = block.name;
+    if (!block.description.empty()) {
+      item["description"] = block.description;
+    }
+    if (!block.mimeType.empty()) {
+      item["mimeType"] = block.mimeType;
+    }
+    break;
+  case ContentType::EmbeddedResource: {
+    if (!block.resource.is_object()) {
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "invalid content block",
+          Json{{"reason", "invalid_content_block"}}));
+    }
+    Json resource = Json::object();
+    for (const char* key : {"uri", "mimeType", "text", "blob"}) {
+      if (block.resource.contains(key)) {
+        resource[key] = block.resource.at(key);
+      }
+    }
+    item["resource"] = std::move(resource);
+    break;
   }
+  }
+
   if (!block.annotations.is_null()) {
     item["annotations"] = block.annotations;
   }
@@ -115,8 +144,12 @@ std::string describeIssues(const Json& data) {
   return text;
 }
 
-void addCompleteResultType(Json& result) {
-  result["resultType"] = std::string(toString(ResultType::Complete));
+Json completeResult(bool is2026) {
+  Json result = Json::object();
+  if (is2026) {
+    result["resultType"] = std::string(toString(ResultType::Complete));
+  }
+  return result;
 }
 
 void addCacheFields(Json& result, std::uint32_t ttlMs,
@@ -287,7 +320,11 @@ Result<Json> inputRequiredToJson(const InputRequired& input, bool is2026) {
 Result<Json> toolResultToJson(const ToolResult& result, bool is2026) {
   Json content = Json::array();
   for (const auto& block : result.content) {
-    content.push_back(contentBlockToJson(block));
+    auto encoded = contentBlockToJson(block);
+    if (!encoded.hasValue()) {
+      return Result<Json>::failure(encoded.error());
+    }
+    content.push_back(std::move(encoded.value()));
   }
 
   Json value;
@@ -299,13 +336,8 @@ Result<Json> toolResultToJson(const ToolResult& result, bool is2026) {
     value["isError"] = true;
   }
   if (is2026) {
-    addCompleteResultType(value);
-    if (result.ttlMs != 0) {
-      value["ttlMs"] = result.ttlMs;
-    }
-    if (!result.cacheScope.empty()) {
-      value["cacheScope"] = result.cacheScope;
-    }
+    value.update(completeResult(is2026));
+    addCacheFields(value, result.ttlMs, result.cacheScope);
   }
   return value;
 }
@@ -384,7 +416,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
       if (result.structuredContent.is_null()) {
         result.isError = true;
         result.content.push_back(ContentBlock{
-            "text",
+            ContentType::Text,
             "output schema is declared but structuredContent is missing"});
       } else {
         Status output_status =
@@ -397,7 +429,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
           if (!details.empty()) {
             note += " [" + details + "]";
           }
-          result.content.push_back(ContentBlock{"text", std::move(note)});
+          result.content.push_back(ContentBlock{ContentType::Text, std::move(note)});
         }
       }
     }
@@ -473,7 +505,7 @@ Result<Json> pageToJson(const Page<T>& page, bool is2026,
     result["nextCursor"] = *page.nextCursor;
   }
   if (is2026) {
-    addCompleteResultType(result);
+    result.update(completeResult(is2026));
     addCacheFields(result, page.ttlMs, page.cacheScope);
   }
   return result;
@@ -576,7 +608,7 @@ Result<Json> readResource(IResourceProvider& provider,
     Json result;
     result["contents"] = Json::array({std::move(item)});
     if (is2026) {
-      addCompleteResultType(result);
+      result.update(completeResult(is2026));
     }
     return result;
   } catch (const std::exception& error) {
@@ -638,7 +670,7 @@ Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
     }
     result["messages"] = prompt.messages;
     if (is2026) {
-      addCompleteResultType(result);
+      result.update(completeResult(is2026));
     }
     return result;
   } catch (const std::exception& error) {
@@ -719,7 +751,7 @@ std::optional<Message> Dispatcher::dispatch(
       for (const auto& item : config_.supportedVersions) {
         supported.push_back(item);
       }
-      Json result;
+      Json result = completeResult(is2026);
       result["supportedVersions"] = std::move(supported);
       result["capabilities"] =
           capabilities(config_, resources_, prompts_, is2026);
@@ -729,7 +761,7 @@ std::optional<Message> Dispatcher::dispatch(
       }
       response.result = std::move(result);
     } else if (request.method == "ping") {
-      response.result = Json::object();
+      response.result = completeResult(is2026);
     } else if (request.method == "tools/list") {
       auto cursor = readCursor(request.params);
       if (!cursor.hasValue()) {
@@ -758,7 +790,7 @@ std::optional<Message> Dispatcher::dispatch(
             result["nextCursor"] = std::to_string(end);
           }
           if (is2026) {
-            addCompleteResultType(result);
+            result.update(completeResult(is2026));
             addCacheFields(result, 0, "private");
           }
           response.result = std::move(result);

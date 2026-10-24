@@ -94,7 +94,7 @@ Message request(std::string method, Json params = nullptr,
 Result<ToolOutcome> completeText(std::string text, bool is_error = false) {
   ToolResult result;
   result.isError = is_error;
-  result.content.push_back(ContentBlock{"text", std::move(text)});
+  result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, std::move(text)});
   return Result<ToolOutcome>(ToolOutcome(std::move(result)));
 }
 
@@ -196,6 +196,34 @@ TEST_CASE("protocol surface: discover reports versions and instructions") {
   CHECK(response->result.at("serverInfo").at("name") == "tugmcp");
 }
 
+TEST_CASE("protocol surface: discover and ping carry resultType in 2026") {
+  ToolRegistry registry;
+  DispatchConfig config;
+  config.supportsSubscriptions = true;
+  auto dispatcher = makeDispatcher(registry, nullptr, nullptr, config);
+
+  auto discover = dispatcher.dispatch(request("server/discover"), kV2026);
+  REQUIRE(discover.has_value());
+  REQUIRE_FALSE(discover->error.has_value());
+  CHECK(discover->result.at("resultType") == "complete");
+  CHECK(discover->result.at("capabilities").at("tools").at("listChanged") ==
+        true);
+  CHECK(discover->result.at("capabilities").contains("subscriptions"));
+
+  auto ping = dispatcher.dispatch(request("ping"), kV2026);
+  REQUIRE(ping.has_value());
+  REQUIRE_FALSE(ping->error.has_value());
+  CHECK(ping->result.at("resultType") == "complete");
+
+  auto legacy_discover =
+      dispatcher.dispatch(request("server/discover"), kV2025);
+  REQUIRE(legacy_discover.has_value());
+  CHECK_FALSE(legacy_discover->result.contains("resultType"));
+  auto legacy_ping = dispatcher.dispatch(request("ping"), kV2025);
+  REQUIRE(legacy_ping.has_value());
+  CHECK(legacy_ping->result == Json::object());
+}
+
 TEST_CASE("protocol surface: tools/list paginates with cursors") {
   ToolRegistry registry;
   addTool(registry, "alpha", [](const Json&, RequestContext&, IProgressSink&) {
@@ -268,7 +296,7 @@ TEST_CASE("protocol surface: tools/call complete result") {
                                IProgressSink&) {
     ToolResult result;
     result.content.push_back(
-        ContentBlock{"text", arguments.value("text", std::string{})});
+        ContentBlock{mcp::v1::ContentType::Text, arguments.value("text", std::string{})});
     result.structuredContent = Json{{"text", arguments.value("text", "")}};
     result.isError = true;
     return Result<ToolOutcome>(ToolOutcome(std::move(result)));
@@ -539,12 +567,22 @@ TEST_CASE("protocol surface: capabilities reflect configured providers") {
   REQUIRE(modern.has_value());
   REQUIRE_FALSE(modern->error.has_value());
   const Json& modern_caps = modern->result.at("capabilities");
-  CHECK(modern_caps.at("tools").is_object());
+  CHECK(modern_caps.at("tools").at("listChanged") == true);
   CHECK(modern_caps.at("resources").at("listChanged") == true);
-  CHECK(modern_caps.at("resources").at("subscribe") == true);
+  CHECK_FALSE(modern_caps.at("resources").contains("subscribe"));
   CHECK(modern_caps.at("prompts").at("listChanged") == true);
-  CHECK(modern_caps.contains("subscriptions"));
-  CHECK(modern_caps.at("subscriptions").is_object());
+  CHECK_FALSE(modern_caps.contains("subscriptions"));
+
+  DispatchConfig streaming_config;
+  streaming_config.supportsSubscriptions = true;
+  auto streaming = makeDispatcher(registry, &resources, &prompts,
+                                  streaming_config);
+  auto streaming_discover =
+      streaming.dispatch(request("server/discover"), kV2026);
+  REQUIRE(streaming_discover.has_value());
+  REQUIRE_FALSE(streaming_discover->error.has_value());
+  CHECK(streaming_discover->result.at("capabilities").contains(
+      "subscriptions"));
 
   auto legacy = configured.dispatch(request("server/discover"), kV2025);
   REQUIRE(legacy.has_value());
@@ -565,7 +603,7 @@ TEST_CASE("protocol surface: content blocks serialize non-text fields") {
                                IProgressSink&) {
     ToolResult result;
     ContentBlock block;
-    block.type = "image";
+    block.type = mcp::v1::ContentType::Image;
     block.text = "caption";
     block.mimeType = "image/png";
     block.dataBase64 = "aGk=";
@@ -584,10 +622,94 @@ TEST_CASE("protocol surface: content blocks serialize non-text fields") {
   REQUIRE_FALSE(response->error.has_value());
   const Json& block = response->result.at("content").at(0);
   CHECK(block.at("type") == "image");
-  CHECK(block.at("text") == "caption");
+  CHECK_FALSE(block.contains("text"));
   CHECK(block.at("mimeType") == "image/png");
   CHECK(block.at("data") == "aGk=");
-  CHECK(block.at("uri") == "file:///image.png");
+  CHECK_FALSE(block.contains("uri"));
   CHECK(block.at("annotations").at("priority") == 0.5);
-  CHECK_FALSE(response->result.contains("ttlMs"));
+  CHECK(response->result.at("ttlMs") == 0);
+  CHECK(response->result.at("cacheScope") == "private");
+}
+
+TEST_CASE("protocol surface: every content type emits only its fields") {
+  ToolRegistry registry;
+  addTool(registry, "blocks", [](const Json&, RequestContext&,
+                                 IProgressSink&) {
+    ToolResult result;
+
+    ContentBlock text;
+    text.type = mcp::v1::ContentType::Text;
+    text.text = "plain";
+    result.content.push_back(text);
+
+    ContentBlock audio;
+    audio.type = mcp::v1::ContentType::Audio;
+    audio.dataBase64 = "YXVkaW8=";
+    audio.mimeType = "audio/wav";
+    result.content.push_back(audio);
+
+    ContentBlock link;
+    link.type = mcp::v1::ContentType::ResourceLink;
+    link.uri = "file:///a.txt";
+    link.name = "a.txt";
+    link.description = "A file";
+    link.mimeType = "text/plain";
+    result.content.push_back(link);
+
+    ContentBlock embedded;
+    embedded.type = mcp::v1::ContentType::EmbeddedResource;
+    embedded.resource =
+        Json{{"uri", "mem://x"}, {"mimeType", "text/plain"}, {"text", "hi"}};
+    result.content.push_back(embedded);
+
+    return Result<ToolOutcome>(ToolOutcome(std::move(result)));
+  });
+
+  auto dispatcher = makeDispatcher(registry);
+  auto response = dispatcher.dispatch(
+      request("tools/call", Json{{"name", "blocks"},
+                                 {"arguments", Json::object()}}),
+      kV2026);
+  REQUIRE(response.has_value());
+  REQUIRE_FALSE(response->error.has_value());
+  const Json& content = response->result.at("content");
+  REQUIRE(content.size() == 4);
+
+  CHECK(content.at(0).at("type") == "text");
+  CHECK(content.at(0).at("text") == "plain");
+  CHECK_FALSE(content.at(0).contains("data"));
+
+  CHECK(content.at(1).at("type") == "audio");
+  CHECK(content.at(1).at("data") == "YXVkaW8=");
+  CHECK(content.at(1).at("mimeType") == "audio/wav");
+  CHECK_FALSE(content.at(1).contains("text"));
+
+  CHECK(content.at(2).at("type") == "resource_link");
+  CHECK(content.at(2).at("uri") == "file:///a.txt");
+  CHECK(content.at(2).at("name") == "a.txt");
+  CHECK(content.at(2).at("description") == "A file");
+  CHECK(content.at(2).at("mimeType") == "text/plain");
+
+  CHECK(content.at(3).at("type") == "resource");
+  CHECK(content.at(3).at("resource").at("uri") == "mem://x");
+  CHECK(content.at(3).at("resource").at("text") == "hi");
+
+  ToolRegistry invalid_registry;
+  addTool(invalid_registry, "bad", [](const Json&, RequestContext&,
+                                      IProgressSink&) {
+    ToolResult result;
+    ContentBlock block;
+    block.type = mcp::v1::ContentType::EmbeddedResource;
+    result.content.push_back(block);
+    return Result<ToolOutcome>(ToolOutcome(std::move(result)));
+  });
+  auto invalid = makeDispatcher(invalid_registry);
+  auto invalid_response = invalid.dispatch(
+      request("tools/call", Json{{"name", "bad"},
+                                 {"arguments", Json::object()}}),
+      kV2026);
+  REQUIRE(invalid_response.has_value());
+  REQUIRE(invalid_response->error.has_value());
+  CHECK(invalid_response->error->data.at("reason") ==
+        "invalid_content_block");
 }

@@ -30,7 +30,7 @@ struct InputRequired {
   std::optional<std::string> requestState;
 
   bool valid() const noexcept {
-    return inputRequests.has_value() || requestState.has_value();
+    return inputRequests.has_value() && requestState.has_value();
   }
 };
 

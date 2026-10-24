@@ -1,4 +1,4 @@
-﻿// 2026 subscriptions/listen loopback: server push notifications and client routing.
+// 2026 subscriptions/listen loopback: server push notifications and client routing.
 
 #include <doctest/doctest.h>
 
@@ -71,6 +71,11 @@ public:
 
   void setOnError(std::function<void(mcp::v1::McpError)> handler) override {
     inner_->setOnError(std::move(handler));
+  }
+
+  void setOnRouteClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnRouteClosed(std::move(handler));
   }
 
   void setOnClose(std::function<void()> handler) override {
@@ -351,4 +356,30 @@ TEST_CASE("server stop closes an open subscription without hanging") {
 
   running.stop();
   client.close();
+}
+TEST_CASE("server drops a subscription when the client stream closes") {
+  ServerOptions options;
+  RunningServer running(options);
+  running.start();
+
+  auto client_storage = makeClient(running.port(), "2026-07-28");
+  McpClient& client = *client_storage;
+  REQUIRE(client.connect().ok);
+
+  SubscriptionFilter filter;
+  filter.resources = {"mem://a"};
+  auto subscribed = client.subscribe(filter, [](const Json&) {});
+  REQUIRE(subscribed.hasValue());
+
+  client.close();
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (running.server().activeSubscriptions() != 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  CHECK(running.server().activeSubscriptions() == 0);
+
+  running.stop();
 }

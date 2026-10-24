@@ -62,6 +62,7 @@ public:
   // calling into the transport.
   void notifyResourceUpdated(std::string_view uri);
   void notifyListChanged(ListKind kind);
+  std::size_t activeSubscriptions() const;
 
   // Last transport/protocol error observed while running (test aid).
   std::optional<McpError> lastError() const;
@@ -77,6 +78,7 @@ private:
 
   void removeSubscription(const SubscriptionId& id);
   void clearSubscriptions() noexcept;
+  void handleRouteClosed(const std::string& route);
 
   // transport_ is declared first so it is destroyed last.
   std::shared_ptr<ITransport> transport_;
@@ -87,10 +89,10 @@ private:
   bool stopping_ = false;
   std::size_t in_flight_ = 0;
   std::optional<McpError> last_error_;
-  std::unordered_map<RequestId, std::shared_ptr<CancellationToken>>
+  std::unordered_map<std::string, std::shared_ptr<CancellationToken>>
       cancellation_tokens_;
 
-  std::mutex subscriptions_mutex_;
+  mutable std::mutex subscriptions_mutex_;
   std::unordered_map<SubscriptionId, SubscriptionState> subscriptions_;
   std::atomic<std::uint64_t> next_subscription_id_{1};
 };

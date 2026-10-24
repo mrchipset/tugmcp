@@ -21,6 +21,7 @@ struct DispatchConfig {
   std::string instructions;
   std::vector<std::string> supportedVersions{"2026-07-28", "2025-11-25"};
   std::size_t pageSize = 100; // 0 disables pagination (tests)
+  bool supportsSubscriptions = false;
 };
 
 using NotificationSink = std::function<void(Json)>;

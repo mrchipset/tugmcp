@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -362,7 +363,8 @@ public:
     }
   }
 
-  void unregisterClient(const std::shared_ptr<httplib::Client>& client) {
+  void unregisterClient(const std::shared_ptr<httplib::Client>& client,
+                        bool has_request_id, const RequestId& request_id) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     for (auto it = active_clients_.begin(); it != active_clients_.end();) {
       auto locked = it->lock();
@@ -372,6 +374,15 @@ public:
         ++it;
       }
     }
+    if (has_request_id) {
+      const auto it = active_by_id_.find(request_id);
+      if (it != active_by_id_.end()) {
+        const auto locked = it->second.lock();
+        if (!locked || locked == client) {
+          active_by_id_.erase(it);
+        }
+      }
+    }
   }
 
   Status send(const Json& message) override {
@@ -379,6 +390,16 @@ public:
     if (!client) {
       return Status::failure(
           reasonError("failed to create http client", "network_error"));
+    }
+
+    bool has_request_id = false;
+    RequestId request_id;
+    if (message.contains("id")) {
+      auto parsed_id = RequestId::fromJson(message.at("id"));
+      if (parsed_id.hasValue()) {
+        request_id = parsed_id.value();
+        has_request_id = true;
+      }
     }
 
     {
@@ -392,12 +413,19 @@ public:
             reasonError("transport is not started", "network_error"));
       }
       active_clients_.push_back(client);
+      if (has_request_id) {
+        active_by_id_[request_id] = client;
+      }
     }
     struct ActiveGuard {
       HttpClientTransport* owner;
       std::shared_ptr<httplib::Client> client;
-      ~ActiveGuard() { owner->unregisterClient(client); }
-    } active_guard{this, client};
+      bool has_request_id;
+      RequestId request_id;
+      ~ActiveGuard() {
+        owner->unregisterClient(client, has_request_id, request_id);
+      }
+    } active_guard{this, client, has_request_id, request_id};
 
     httplib::Headers headers;
     headers.emplace("Accept", "application/json, text/event-stream");
@@ -509,20 +537,16 @@ public:
     return Status::success();
   }
 
-  void cancelPending(const RequestId&) override {
-    std::vector<std::shared_ptr<httplib::Client>> clients;
+  void cancelPending(const RequestId& id) override {
+    std::shared_ptr<httplib::Client> client;
     {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-      if (client_) {
-        clients.push_back(client_);
-      }
-      for (const auto& weak : active_clients_) {
-        if (auto client = weak.lock()) {
-          clients.push_back(std::move(client));
-        }
+      const auto it = active_by_id_.find(id);
+      if (it != active_by_id_.end()) {
+        client = it->second.lock();
       }
     }
-    for (const auto& client : clients) {
+    if (client) {
       try {
         client->stop();
       } catch (...) {
@@ -637,6 +661,9 @@ private:
   std::atomic<bool> close_notified_{false};
 
   std::vector<std::weak_ptr<httplib::Client>> active_clients_;
+  std::unordered_map<RequestId, std::weak_ptr<httplib::Client>,
+                     std::hash<RequestId>>
+      active_by_id_;
 
   std::mutex callback_mutex_;
   std::function<void(Json)> on_message_;

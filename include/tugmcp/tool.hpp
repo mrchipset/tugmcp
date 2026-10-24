@@ -22,15 +22,42 @@ namespace v1 {
 
 using Json = nlohmann::json;
 
-// MCP content block. `type` stays first and `text` second so existing
-// aggregate initialization such as ContentBlock{"text", "hello"} is unchanged.
+enum class ContentType {
+  Text,
+  Image,
+  Audio,
+  ResourceLink,
+  EmbeddedResource
+};
+
+inline std::string_view toString(ContentType type) noexcept {
+  switch (type) {
+  case ContentType::Text:
+    return "text";
+  case ContentType::Image:
+    return "image";
+  case ContentType::Audio:
+    return "audio";
+  case ContentType::ResourceLink:
+    return "resource_link";
+  case ContentType::EmbeddedResource:
+    return "resource";
+  }
+  return "text";
+}
+
+// MCP content block. The dispatcher emits only the fields that belong to the
+// selected content type, so callers must set `type` explicitly.
 struct ContentBlock {
-  std::string type = "text";
+  ContentType type = ContentType::Text;
   std::string text;
+  std::string name;
+  std::string description;
   std::string mimeType;
   std::string dataBase64;
   std::string uri;
   Json annotations;
+  Json resource;
 };
 
 // Tool names must not contain '#': the registry derives the output-schema id

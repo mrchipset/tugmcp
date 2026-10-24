@@ -215,7 +215,9 @@ public:
 
   void waitReady() { ready_.get_future().wait(); }
 
-  void deliver(Json message) {
+  void deliver(Json message) { deliver(std::move(message), {}); }
+
+  void deliver(Json message, MessageMetadata metadata) {
     MessageHandlerEx extended;
     std::function<void(Json)> simple;
     {
@@ -224,7 +226,7 @@ public:
       simple = on_message_;
     }
     if (extended) {
-      extended(std::move(message), MessageMetadata{});
+      extended(std::move(message), metadata);
     } else if (simple) {
       simple(std::move(message));
     }
@@ -294,7 +296,7 @@ TEST_CASE("injected executor runs the handler off the run thread") {
                          handler_thread.store(std::this_thread::get_id());
                          ToolResult result;
                          result.content.push_back(
-                             ContentBlock{"text", "done"});
+                             ContentBlock{mcp::v1::ContentType::Text, "done"});
                          return Result<ToolOutcome>(
                              ToolOutcome(std::move(result)));
                        }))
@@ -333,7 +335,7 @@ TEST_CASE("stop waits for a blocking synchronous handler to finish") {
                          release_future.wait();
                          ToolResult result;
                          result.content.push_back(
-                             ContentBlock{"text", "released"});
+                             ContentBlock{mcp::v1::ContentType::Text, "released"});
                          return Result<ToolOutcome>(
                              ToolOutcome(std::move(result)));
                        }))
@@ -426,4 +428,62 @@ TEST_CASE("transport start exception is contained by run") {
   CHECK(static_cast<int>(status.error.code) ==
         static_cast<int>(ErrorCode::InternalError));
   CHECK(status.error.message == "server run failed");
+}
+TEST_CASE("same request id on two routes both observe stop cancellation") {
+  auto transport = std::make_shared<ManualTransport>();
+
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  McpServer server(options, transport);
+
+  std::atomic<int> entered{0};
+  std::promise<void> both_entered;
+  auto both_entered_future = both_entered.get_future();
+  std::atomic<int> observed_cancelled{0};
+  REQUIRE(server.tools()
+              .add(handlerTool("block"),
+                   std::make_shared<ScopedToolHandler>(
+                       [&](const Json&, RequestContext& context,
+                           IProgressSink&) {
+                         if (entered.fetch_add(1) + 1 == 2) {
+                           both_entered.set_value();
+                         }
+                         while (context.cancellation &&
+                                !context.cancellation->cancelled()) {
+                           std::this_thread::sleep_for(
+                               std::chrono::milliseconds(1));
+                         }
+                         observed_cancelled.fetch_add(1);
+                         ToolResult result;
+                         result.content.push_back(ContentBlock{
+                             mcp::v1::ContentType::Text, "done"});
+                         return Result<ToolOutcome>(
+                             ToolOutcome(std::move(result)));
+                       }))
+              .ok);
+
+  auto run_future =
+      std::async(std::launch::async, [&server] { return server.run(); });
+  transport->waitReady();
+
+  auto call = toolsCallRequest("block", 1);
+  std::thread first([&] {
+    MessageMetadata metadata;
+    metadata.route = "route-a";
+    transport->deliver(call, metadata);
+  });
+  std::thread second([&] {
+    MessageMetadata metadata;
+    metadata.route = "route-b";
+    transport->deliver(call, metadata);
+  });
+
+  both_entered_future.wait();
+  server.stop();
+  first.join();
+  second.join();
+
+  const Status status = run_future.get();
+  CHECK(status.ok);
+  CHECK(observed_cancelled.load() == 2);
 }

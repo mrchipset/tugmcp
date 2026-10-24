@@ -20,7 +20,7 @@ public:
     }
 
     ToolResult result;
-    result.content.push_back(ContentBlock{"text", text});
+    result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, text});
     result.structuredContent = Json{{"text", text}};
     return ToolOutcome(std::move(result));
   }

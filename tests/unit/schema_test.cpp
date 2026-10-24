@@ -42,7 +42,7 @@ class ConstantHandler final : public IToolHandler {
 public:
   Result<ToolOutcome> invoke(const Json&, RequestContext&, IProgressSink&) override {
     ToolResult result;
-    result.content.push_back(ContentBlock{"text", "ok"});
+    result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, "ok"});
     result.structuredContent = Json{{"value", 42}};
     return ToolOutcome(std::move(result));
   }
@@ -52,7 +52,7 @@ class PlainHandler final : public IToolHandler {
 public:
   Result<ToolOutcome> invoke(const Json&, RequestContext&, IProgressSink&) override {
     ToolResult result;
-    result.content.push_back(ContentBlock{"text", "ok"});
+    result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, "ok"});
     return ToolOutcome(std::move(result));
   }
 };

@@ -31,7 +31,7 @@ public:
   Result<ToolOutcome> invoke(const Json&, RequestContext&,
                              IProgressSink&) override {
     ToolResult result;
-    result.content.push_back(ContentBlock{"text", name_});
+    result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, name_});
     return ToolOutcome(std::move(result));
   }
 

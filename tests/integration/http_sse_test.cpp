@@ -1,4 +1,4 @@
-﻿// Wire-level Streamable HTTP/SSE checks using a raw httplib client.
+// Wire-level Streamable HTTP/SSE checks using a raw httplib client.
 
 #include <doctest/doctest.h>
 
@@ -79,6 +79,11 @@ public:
     inner_->setOnError(std::move(handler));
   }
 
+  void setOnRouteClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnRouteClosed(std::move(handler));
+  }
+
   void setOnClose(std::function<void()> handler) override {
     inner_->setOnClose(std::move(handler));
   }
@@ -155,7 +160,7 @@ public:
                              IProgressSink& progress) override {
     invoke_(arguments, context, progress);
     ToolResult result;
-    result.content.push_back(ContentBlock{"text", "ok"});
+    result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, "ok"});
     return ToolOutcome(std::move(result));
   }
 
@@ -255,6 +260,44 @@ public:
   AdmissionDecision admit(const RequestContext&, const Json&) override {
     return AdmissionDecision::Reject;
   }
+};
+
+class AlwaysEmergency final : public IAdmissionHook {
+public:
+  AdmissionDecision admit(const RequestContext&, const Json&) override {
+    return AdmissionDecision::Emergency;
+  }
+};
+
+class RecordingExecutor final : public mcp::v1::IExecutor {
+public:
+  mcp::v1::ExecutorSubmitResult post(std::function<void()> task,
+                                     mcp::v1::Priority priority) noexcept override {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      priorities_.push_back(priority);
+    }
+    task();
+    return mcp::v1::ExecutorSubmitResult{};
+  }
+
+  void drain() noexcept override {}
+  void stop() noexcept override {}
+  std::size_t workerCount() const noexcept override { return 0; }
+
+  bool saw(mcp::v1::Priority priority) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto value : priorities_) {
+      if (value == priority) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::vector<mcp::v1::Priority> priorities_;
 };
 
 } // namespace
@@ -503,18 +546,70 @@ TEST_CASE("perStreamQueue overflow terminates without a final response") {
   REQUIRE(response);
   CHECK(response->status == 200);
 
-  bool saw_final = false;
+  bool saw_error = false;
   const std::vector<Json> frames = parseSse(response->body);
   for (const auto& frame : frames) {
     if (frame.contains("id") && frame.value("id", std::int64_t{}) == 70) {
-      saw_final = true;
+      REQUIRE(frame.contains("error"));
+      CHECK(frame.at("error").at("data").at("reason") ==
+            "stream_overflow");
+      saw_error = true;
     }
   }
-  CHECK_FALSE(saw_final);
+  CHECK(saw_error);
 
   const std::optional<mcp::v1::McpError> error = running.server().lastError();
   REQUIRE(error.has_value());
   CHECK(error->data.at("reason") == "stream_overflow");
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("2026 _meta.protocolVersion must match the header") {
+  StreamableHttpServerOptions http_options;
+  ServerOptions core_options;
+  RunningServer running(http_options, core_options);
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 91},
+           {"method", "ping"},
+           {"params",
+            Json{{"_meta", Json{{"protocolVersion", "2025-11-25"}}}}}};
+  auto response =
+      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(),
+                  "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 400);
+  const Json error = Json::parse(response->body);
+  CHECK(error.at("id") == 91);
+  CHECK(error.at("error").at("code") == -32020);
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("emergency admission posts with Emergency priority") {
+  StreamableHttpServerOptions http_options;
+  http_options.admission = std::make_shared<AlwaysEmergency>();
+  auto executor = std::make_shared<RecordingExecutor>();
+  ServerOptions core_options;
+  core_options.executor = executor;
+  RunningServer running(http_options, core_options);
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json body = Json{{"jsonrpc", "2.0"},
+                         {"id", 95},
+                         {"method", "ping"},
+                         {"params", Json::object()}};
+  auto response =
+      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(),
+                  "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 200);
+  CHECK(executor->saw(mcp::v1::Priority::Emergency));
 
   client.stop();
   running.stop();

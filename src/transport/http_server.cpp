@@ -1,7 +1,8 @@
-﻿#include "tugmcp/transport/http.hpp"
+#include "tugmcp/transport/http.hpp"
 
 #include "tugmcp/detail/http_httplib.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -101,6 +102,13 @@ public:
     }
 
     server_->set_payload_max_length(options_.maxBodyBytes);
+    const std::size_t pool =
+        options_.maxConcurrentStreams == 0
+            ? 16
+            : std::max<std::size_t>(8, options_.maxConcurrentStreams + 4);
+    server_->new_task_queue = [pool] {
+      return new httplib::ThreadPool(pool);
+    };
     registerHandlers();
 
     int port = options_.port;
@@ -143,20 +151,26 @@ public:
       return Status::success();
     }
 
-    bool completed = false;
+    std::shared_ptr<Pending> match;
+    std::size_t matches = 0;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
       for (auto& item : pending_) {
         auto& pending = item.second;
         if (!pending->done && pending->id == decoded.id) {
-          pending->done = true;
-          pending->response = message;
-          completed = true;
-          break;
+          match = pending;
+          ++matches;
         }
       }
+      if (matches == 1) {
+        match->done = true;
+        match->response = message;
+      }
     }
-    if (completed) {
+    if (matches > 1) {
+      return failure(ErrorCode::InternalError, "ambiguous route");
+    }
+    if (matches == 1) {
       pending_cv_.notify_all();
     }
     return Status::success();
@@ -247,6 +261,11 @@ public:
     on_close_ = std::move(handler);
   }
 
+  void setOnRouteClosed(std::function<void(const std::string&)> handler) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    on_route_closed_ = std::move(handler);
+  }
+
   void close() noexcept {
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
       notifyClose();
@@ -254,6 +273,7 @@ public:
     }
 
     std::vector<std::shared_ptr<SseStream>> streams;
+    std::vector<std::string> pending_routes;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
       for (auto& item : pending_) {
@@ -262,6 +282,7 @@ public:
           pending->done = true;
           pending->closed = true;
         }
+        pending_routes.push_back(item.first);
       }
       streams.reserve(streams_.size());
       for (auto& item : streams_) {
@@ -269,6 +290,9 @@ public:
       }
     }
     pending_cv_.notify_all();
+    for (const auto& route : pending_routes) {
+      notifyRouteClosed(route);
+    }
 
     for (const auto& stream : streams) {
       std::lock_guard<std::mutex> lock(stream->mutex);
@@ -321,6 +345,7 @@ private:
 
   struct SseStream {
     std::string route;
+    RequestId request_id;
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<Json> frames;
@@ -404,6 +429,20 @@ private:
     }
   }
 
+  void notifyRouteClosed(const std::string& route) noexcept {
+    std::function<void(const std::string&)> handler;
+    {
+      std::lock_guard<std::mutex> lock(callback_mutex_);
+      handler = on_route_closed_;
+    }
+    if (handler) {
+      try {
+        handler(route);
+      } catch (...) {
+      }
+    }
+  }
+
   void releaseStream(const std::string& route,
                      const std::shared_ptr<SseStream>& stream) noexcept {
     {
@@ -413,6 +452,7 @@ private:
         streams_.erase(it);
       }
     }
+    notifyRouteClosed(route);
     bool expected = false;
     if (stream->released.compare_exchange_strong(expected, true)) {
       active_streams_.fetch_sub(1, std::memory_order_acq_rel);
@@ -438,6 +478,10 @@ private:
       }
       if (!final && options_.perStreamQueue != 0 &&
           stream->frames.size() >= options_.perStreamQueue) {
+        stream->frames.push_back(errorResponseJson(
+            stream->request_id,
+            McpError::make(ErrorCode::InternalError, "stream overflow",
+                           Json{{"reason", "stream_overflow"}})));
         stream->overflow = true;
         stream->done = true;
         stream->cv.notify_all();
@@ -462,6 +506,8 @@ private:
 
   bool streamProvider(const std::shared_ptr<SseStream>& stream,
                       httplib::DataSink& sink) {
+    auto next_keepalive =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     for (;;) {
       Json frame;
       bool have_frame = false;
@@ -473,6 +519,12 @@ private:
           });
         }
         if (stream->closed) {
+          return false;
+        }
+        if (stream->frames.empty() && !stream->done &&
+            sink.is_writable && !sink.is_writable()) {
+          stream->closed = true;
+          stream->cv.notify_all();
           return false;
         }
         if (!stream->frames.empty()) {
@@ -488,6 +540,17 @@ private:
       }
 
       if (!have_frame) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_keepalive) {
+          next_keepalive = now + std::chrono::milliseconds(500);
+          static const char keepalive[] = ": keepalive\n\n";
+          if (!sink.write(keepalive, sizeof(keepalive) - 1)) {
+            std::lock_guard<std::mutex> lock(stream->mutex);
+            stream->closed = true;
+            stream->cv.notify_all();
+            return false;
+          }
+        }
         continue;
       }
 
@@ -557,6 +620,7 @@ private:
       on_message_ex_ = nullptr;
       on_error_ = nullptr;
       on_close_ = nullptr;
+      on_route_closed_ = nullptr;
     }
     if (!notify || !handler) {
       return;
@@ -689,6 +753,23 @@ private:
       }
       const Json& document = parsed.value();
 
+      if (version == "2026-07-28" && message.params.is_object() &&
+          message.params.contains("_meta") &&
+          message.params.at("_meta").is_object() &&
+          message.params.at("_meta").contains("protocolVersion")) {
+        const Json& meta_version =
+            message.params.at("_meta").at("protocolVersion");
+        if (!meta_version.is_string() ||
+            meta_version.get<std::string>() != version) {
+          respondError(response, 400,
+                       McpError::make(ErrorCode::HeaderMismatch,
+                                      "_meta.protocolVersion mismatch"),
+                       message.id.toJson());
+          return;
+        }
+      }
+
+      bool emergency = false;
       if (options_.admission) {
         RequestContext context;
         context.id = message.id;
@@ -706,6 +787,7 @@ private:
           response.status = 429;
           return;
         }
+        emergency = decision == AdmissionDecision::Emergency;
       }
 
       if (!hasMessageHandler()) {
@@ -740,6 +822,7 @@ private:
         MessageMetadata metadata;
         metadata.protocolVersion = version;
         metadata.route = route;
+        metadata.emergency = emergency;
         const bool invoked = invokeMessage(document, metadata);
         erasePending(route);
         if (!invoked) {
@@ -761,6 +844,7 @@ private:
       if (wants_sse) {
         auto stream = std::make_shared<SseStream>();
         stream->route = nextRoute();
+        stream->request_id = message.id;
         const std::string route = stream->route;
 
         if (!tryAcquireStream()) {
@@ -792,6 +876,7 @@ private:
         MessageMetadata metadata;
         metadata.protocolVersion = version;
         metadata.route = route;
+        metadata.emergency = emergency;
         if (!invokeMessage(document, metadata)) {
           const McpError error = McpError::make(
               ErrorCode::InternalError, "message handler unavailable");
@@ -820,6 +905,7 @@ private:
       MessageMetadata metadata;
       metadata.protocolVersion = version;
       metadata.route = route;
+      metadata.emergency = emergency;
       if (!invokeMessage(document, metadata)) {
         erasePending(route);
         respondError(response, 500,
@@ -836,6 +922,7 @@ private:
       if (!completed) {
         pending_.erase(route);
         lock.unlock();
+        notifyRouteClosed(route);
         respondError(response, 504,
                      McpError::make(ErrorCode::InternalError,
                                     "request timed out"),
@@ -845,6 +932,7 @@ private:
       if (pending->closed) {
         pending_.erase(route);
         lock.unlock();
+        notifyRouteClosed(route);
         respondError(response, 503,
                      McpError::make(ErrorCode::InternalError,
                                     "transport is closed"),
@@ -879,6 +967,7 @@ private:
   MessageHandlerEx on_message_ex_;
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
+  std::function<void(const std::string&)> on_route_closed_;
 
   std::mutex routes_mutex_;
   std::condition_variable pending_cv_;
@@ -921,6 +1010,11 @@ void HttpServerTransport::setOnError(
 
 void HttpServerTransport::setOnClose(std::function<void()> handler) {
   impl_->setOnClose(std::move(handler));
+}
+
+void HttpServerTransport::setOnRouteClosed(
+    std::function<void(const std::string&)> handler) {
+  impl_->setOnRouteClosed(std::move(handler));
 }
 
 void HttpServerTransport::close() { impl_->close(); }

@@ -64,7 +64,7 @@ public:
   Result<ToolOutcome> invoke(const Json& arguments, RequestContext&, IProgressSink&) override {
     ToolResult result;
     ContentBlock block;
-    block.type = "text";
+    block.type = mcp::v1::ContentType::Text;
     block.text = arguments.value("text", std::string{});
     result.content.push_back(block);
     result.structuredContent = Json{{"text", block.text}};

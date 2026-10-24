@@ -93,6 +93,11 @@ public:
     inner_->setOnError(std::move(handler));
   }
 
+  void setOnRouteClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnRouteClosed(std::move(handler));
+  }
+
   void setOnClose(std::function<void()> handler) override {
     inner_->setOnClose(std::move(handler));
   }
@@ -192,7 +197,7 @@ void addTool(McpServer& server, const std::string& name,
 
 Result<ToolOutcome> textOutcome(std::string text) {
   ToolResult result;
-  result.content.push_back(ContentBlock{"text", std::move(text)});
+  result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, std::move(text)});
   result.structuredContent = Json{{"text", result.content.front().text}};
   return Result<ToolOutcome>(ToolOutcome(std::move(result)));
 }
@@ -307,7 +312,7 @@ TEST_CASE("2026 listTools and callTool round-trip") {
             ToolResult result;
             const std::string text =
                 arguments.value("text", std::string{});
-            result.content.push_back(ContentBlock{"text", text});
+            result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, text});
             result.structuredContent = Json{{"text", text}};
             return ToolOutcome(std::move(result));
           });
@@ -379,6 +384,7 @@ TEST_CASE("2026 MRTR retry carries requestState and inputResponses") {
               return textOutcome("answered");
             }
             mcp::v1::InputRequired input;
+            input.inputRequests = Json{{"answer", "boolean"}};
             input.requestState = "state-2026";
             return Result<ToolOutcome>(ToolOutcome(std::move(input)));
           });
@@ -582,6 +588,71 @@ TEST_CASE("2026 client request shape leaves no server-side header errors") {
   auto called = client.callTool("ping-tool");
   REQUIRE(called.hasValue());
   CHECK_FALSE(running.server().lastError().has_value());
+
+  client.close();
+  running.stop();
+}
+TEST_CASE("cancelling one call keeps subscriptions and other calls alive") {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  RunningServer running(options);
+
+  std::promise<void> slow_entered;
+  auto slow_entered_future = slow_entered.get_future();
+  std::promise<void> slow_release;
+  auto slow_release_future = slow_release.get_future();
+  addTool(running.server(), "slow",
+          [&](const Json&, RequestContext&, IProgressSink&) {
+            slow_entered.set_value();
+            slow_release_future.wait();
+            return textOutcome("late");
+          });
+  addTool(running.server(), "echo",
+          [](const Json&, RequestContext&, IProgressSink&) {
+            return textOutcome("ok");
+          });
+  running.start();
+
+  auto client_storage = makeClient(running.port());
+  McpClient& client = *client_storage;
+  REQUIRE(client.connect().ok);
+
+  mcp::v1::SubscriptionFilter filter;
+  filter.resources = {"mem://keep"};
+  std::promise<void> notified;
+  auto notified_future = notified.get_future();
+  auto subscription = client.subscribe(filter, [&](const Json&) {
+    try {
+      notified.set_value();
+    } catch (...) {
+    }
+  });
+  REQUIRE(subscription.hasValue());
+
+  auto token = std::make_shared<mcp::v1::CancellationToken>();
+  CallOptions slow_options;
+  slow_options.cancellation = token;
+  std::optional<Result<Json>> slow_outcome;
+  std::thread slow_caller([&] {
+    slow_outcome = client.callTool("slow", Json::object(), slow_options);
+  });
+  slow_entered_future.wait();
+
+  // A second concurrent call must still succeed while the slow call is
+  // blocked and the subscription stream is open.
+  auto echo = client.callTool("echo");
+  REQUIRE(echo.hasValue());
+  CHECK(echo.value().at("structuredContent").at("text") == "ok");
+
+  token->cancel();
+  slow_caller.join();
+  REQUIRE(slow_outcome.has_value());
+  REQUIRE_FALSE(slow_outcome->hasValue());
+  CHECK(slow_outcome->error().data.at("reason") == "cancelled");
+  slow_release.set_value();
+
+  running.server().notifyResourceUpdated("mem://keep");
+  notified_future.wait();
 
   client.close();
   running.stop();

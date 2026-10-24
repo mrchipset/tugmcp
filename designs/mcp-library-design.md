@@ -312,19 +312,19 @@ enum class ListKind { Tools, Prompts, Resources };
 
 struct Method { std::string value; };
 
-struct ProgressToken {
-    std::variant<std::string, std::int64_t> value;
+using ProgressToken = std::variant<std::string, std::int64_t>;
+struct Progress {
+    ProgressToken token;
+    double progress = 0.0;
+    std::optional<double> total;
+    std::string message;
 };
-struct Progress { ProgressToken token; double fraction = 0; std::string message; };
 enum class CancelMode { Auto, CloseStream, Notification };
 
-using SubscriptionId = RequestId; // 2026 `subscriptions/listen` 的 request id
-
+using SubscriptionId = std::string;  // 服务端生成的不透明 id（"s1"…）
 struct SubscriptionFilter {
-    bool toolsListChanged = false;
-    bool promptsListChanged = false;
-    bool resourcesListChanged = false;
-    std::vector<std::string> resourceSubscriptions;
+    std::vector<ListKind> listChanged;      // 空 = 不订阅 list_changed
+    std::vector<std::string> resources;     // 精确 URI 订阅
 };
 
 struct AuthContext {
@@ -343,14 +343,11 @@ struct TraceContext {
 
 struct RequestContext {
     RequestId id;
-    ProtocolVersion version;
-    ProtocolEra era = ProtocolEra::V2026;
     Method method;
-    AuthContext auth;
-    TraceContext trace;
-    Json meta;                   // _meta
     Json inputResponses;         // MRTR retry 的客户端输入
+    std::optional<std::string> requestState;
     std::shared_ptr<CancellationToken> cancellation;
+    // version/era/meta/auth/trace 随 P3/P4 加入；当前实现只保留以上字段。
 };
 
 struct ClientInfo { std::string name, version; };
@@ -717,10 +714,10 @@ public:
 | pending registry | 每个 request id 记录 sink/cancel/timeout；响应/取消/关闭时移除；重连后按 era 恢复 |
 | 2025 恢复 | 保存 `Last-Event-ID`（per-stream，有界 replay）；重连按 stream 续传 |
 | 2026 恢复 | 无 Last-Event-ID；重新 discover/订阅，用 `latest`/分页补齐；旧 pending 请求取消 |
-| 连接 | 每 session 一个 `httplib::Client`；禁止多线程并发复用同一 client；连接池按线程/会话 |
+| 连接 | **P2b 现状**：每次 `send` 创建独立 `httplib::Client`（活跃 client 由 weak_ptr 跟踪），以便订阅流与普通调用并行；取消按 request id 精确停止对应 client。**M4/M5 目标**：每 session 一个 client + 连接复用；禁止多线程并发复用同一 client |
 | 背压 | SSE 队列有界；慢消费者丢弃/断开；不阻塞 IO 线程 |
 
-> `httplib::Client` 不是线程安全的通用客户端；库必须为每个并发请求/会话隔离 client，或用显式 mutex 串行化。
+> `httplib::Client` 不是线程安全的通用客户端；库必须为每个并发请求/会话隔离 client，或用显式 mutex 串行化。P2b 用 per-send client 换取隔离，连接复用/TLS 握手成本在 M4/M5 重新评估。
 
 ---
 
@@ -982,6 +979,8 @@ struct CallOptions {
 class McpClient {
 public:
     explicit McpClient(ClientOptions, std::shared_ptr<ITransport>);
+    // P2b 先交付 Result<Json> 版本（discover/list*/read/get/callTool/subscribe）；
+    // 下方强类型签名是 M4 目标，避免在 M2 冻结错误的公共类型。
     Result<DiscoverResult> discover();
     Result<InitializeResult> initialize();
     Result<Page<ToolDescriptor>> listTools(std::string_view cursor = {});

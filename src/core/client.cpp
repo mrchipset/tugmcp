@@ -79,17 +79,31 @@ struct ClientSubscription {
       std::make_shared<std::atomic<bool>>(false)};
 };
 
-class McpClient::Impl {
+class McpClient::Impl : public std::enable_shared_from_this<McpClient::Impl> {
 public:
   Impl(ClientOptions options, std::shared_ptr<ITransport> transport)
-      : options_(std::move(options)), transport_(std::move(transport)) {
-    if (transport_) {
-      transport_->setOnMessage(
-          [this](Json message) { handleMessage(std::move(message)); });
-      transport_->setOnError(
-          [this](McpError error) { handleError(std::move(error)); });
-      transport_->setOnClose([this] { handleClose(); });
+      : options_(std::move(options)), transport_(std::move(transport)) {}
+
+  void installCallbacks() {
+    if (!transport_) {
+      return;
     }
+    std::weak_ptr<Impl> weak = weak_from_this();
+    transport_->setOnMessage([weak](Json message) {
+      if (auto self = weak.lock()) {
+        self->handleMessage(std::move(message));
+      }
+    });
+    transport_->setOnError([weak](McpError error) {
+      if (auto self = weak.lock()) {
+        self->handleError(std::move(error));
+      }
+    });
+    transport_->setOnClose([weak] {
+      if (auto self = weak.lock()) {
+        self->handleClose();
+      }
+    });
   }
 
   Status connect() {
@@ -1061,10 +1075,15 @@ private:
 
 McpClient::McpClient(ClientOptions options,
                      std::shared_ptr<ITransport> transport)
-    : impl_(std::make_unique<Impl>(std::move(options),
-                                   std::move(transport))) {}
+    : impl_(std::make_shared<Impl>(std::move(options),
+                                   std::move(transport))) {
+  impl_->installCallbacks();
+}
 
-McpClient::~McpClient() { close(); }
+McpClient::~McpClient() {
+  close();
+  impl_.reset();
+}
 
 Status McpClient::connect() { return impl_->connect(); }
 

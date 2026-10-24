@@ -88,7 +88,7 @@ void addTool(ToolRegistry& registry, std::string name, CallFn fn,
 ToolOutcome textResult(std::string text, bool is_error = false) {
   ToolResult result;
   result.isError = is_error;
-  result.content.push_back(ContentBlock{"text", std::move(text)});
+  result.content.push_back(ContentBlock{mcp::v1::ContentType::Text, std::move(text)});
   return ToolOutcome(std::move(result));
 }
 
@@ -151,8 +151,8 @@ TEST_CASE("dispatcher lists tools sorted by name") {
   REQUIRE(tools.size() == 2);
   CHECK(tools.at(0).at("name") == "alpha");
   CHECK(tools.at(1).at("name") == "zeta");
-  CHECK(tools.at(0).at("idempotent") == true);
-  CHECK_FALSE(tools.at(1).contains("idempotent"));
+  CHECK(tools.at(0).at("annotations").at("idempotent") == true);
+  CHECK_FALSE(tools.at(1).contains("annotations"));
   CHECK(tools.at(0).at("inputSchema").is_object());
 }
 
@@ -165,7 +165,8 @@ TEST_CASE("dispatcher calls a tool successfully") {
             CHECK(context.method == "tools/call");
             ToolResult result;
             result.content.push_back(ContentBlock{
-                "text", arguments.at("text").get<std::string>()});
+                mcp::v1::ContentType::Text,
+                arguments.at("text").get<std::string>()});
             result.structuredContent = Json{{"text", arguments.at("text")}};
             return Result<ToolOutcome>(ToolOutcome(std::move(result)));
           });
