@@ -6,6 +6,7 @@
 #include <string>
 
 #include "message.hpp"
+#include "security.hpp"
 
 namespace mcp {
 namespace v1 {
@@ -42,6 +43,7 @@ struct RequestContext {
   Json clientCapabilities;
   std::optional<RequestId> subscriptionId;
   std::string sessionId;
+  AuthContext auth;
 };
 
 } // namespace v1

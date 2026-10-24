@@ -9,6 +9,7 @@
 
 #include <tugmcp/message.hpp>
 #include <tugmcp/prompt.hpp>
+#include <tugmcp/security.hpp>
 #include <tugmcp/resource.hpp>
 #include <tugmcp/tool.hpp>
 
@@ -23,6 +24,11 @@ struct DispatchConfig {
   std::size_t pageSize = 100; // 0 disables pagination (tests)
   bool supportsSubscriptions = false;
   ICompletionProvider* completions = nullptr;
+  IAuthorizer* authorizer = nullptr;
+  IApprovalHook* approval = nullptr;
+  IAuditHook* audit = nullptr;
+  std::chrono::milliseconds approvalTimeout{30000};
+  std::function<void(McpError)> onError;
 };
 
 using NotificationSink = std::function<void(Json)>;
@@ -44,7 +50,8 @@ public:
       const NotificationSink& notify = {},
       std::shared_ptr<CancellationToken> token = nullptr,
       std::string sessionId = {},
-      Json clientCapabilities = Json::object());
+      Json clientCapabilities = Json::object(),
+      AuthContext auth = {});
 
 private:
   ToolRegistry& registry_;

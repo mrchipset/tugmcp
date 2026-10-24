@@ -71,6 +71,32 @@ Json capabilities(const DispatchConfig& config,
   return value;
 }
 
+struct SecurityHooks {
+  IAuthorizer* authorizer = nullptr;
+  IApprovalHook* approval = nullptr;
+  IAuditHook* audit = nullptr;
+  std::chrono::milliseconds approvalTimeout{30000};
+  std::function<void(McpError)> onError;
+};
+
+void auditEvent(const SecurityHooks& security, const AuthContext& auth,
+                const char* event, const Json& detail) noexcept {
+  if (security.audit == nullptr) {
+    return;
+  }
+  try {
+    security.audit->onEvent(auth, event, detail);
+  } catch (...) {
+    if (security.onError) {
+      try {
+        security.onError(McpError::make(
+            ErrorCode::InternalError, "audit hook failed",
+            Json{{"reason", "audit_failed"}}));
+      } catch (...) {
+      }
+    }
+  }
+}
 Result<Json> validateRequestMeta(const Message& request,
                                  const std::string& version) {
   if (!request.params.is_object() || !request.params.contains("_meta") ||
@@ -342,7 +368,8 @@ private:
 RequestContext makeContext(const Message& request,
                            const std::shared_ptr<CancellationToken>& token,
                            const Json& client_capabilities = Json(),
-                           const std::string& session_id = std::string()) {
+                           const std::string& session_id = std::string(),
+                           const AuthContext& auth = AuthContext{}) {
   RequestContext context;
   context.id = request.id;
   context.method = request.method;
@@ -350,6 +377,7 @@ RequestContext makeContext(const Message& request,
       token ? token : std::make_shared<CancellationToken>();
   context.clientCapabilities = client_capabilities;
   context.sessionId = session_id;
+  context.auth = auth;
   return context;
 }
 
@@ -405,7 +433,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
                       bool is2026, const NotificationSink& notify,
                       const std::shared_ptr<CancellationToken>& token,
                       const Json& client_capabilities,
-                      const std::string& session_id) {
+                      const std::string& session_id, const AuthContext& auth, const SecurityHooks& security) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "tools/call params must be an object"));
@@ -438,6 +466,93 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
     return Result<Json>::failure(input_status.error);
   }
 
+  if (security.authorizer != nullptr) {
+    Status allowed;
+    try {
+      allowed = security.authorizer->authorize(auth, name);
+    } catch (...) {
+      allowed = Status::failure(McpError::make(
+          ErrorCode::InternalError, "authorization failed"));
+    }
+    if (!allowed) {
+      auditEvent(security, auth, "authorization_denied",
+                 Json{{"tool", name}, {"reason", "forbidden"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "forbidden",
+          Json{{"reason", "forbidden"}}));
+    }
+  }
+  auditEvent(security, auth, "tool_call",
+             Json{{"tool", name}, {"arguments", arguments}});
+
+  if (security.approval != nullptr) {
+    ApprovalRequest approval;
+    approval.auth = auth;
+    approval.tool = name;
+    approval.arguments = arguments;
+    approval.id = request.id;
+    approval.deadline =
+        std::chrono::steady_clock::now() + security.approvalTimeout;
+    approval.cancellation = token;
+
+    std::future<ApprovalResult> future;
+    try {
+      future = security.approval->approve(approval);
+    } catch (...) {
+      auditEvent(security, auth, "approval_denied",
+                 Json{{"tool", name}, {"reason", "hook_failed"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "approval denied",
+          Json{{"reason", "approval_denied"}}));
+    }
+    if (!future.valid()) {
+      auditEvent(security, auth, "approval_denied",
+                 Json{{"tool", name}, {"reason", "invalid_future"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "approval denied",
+          Json{{"reason", "approval_denied"}}));
+    }
+
+    for (;;) {
+      if (token && token->cancelled()) {
+        auditEvent(security, auth, "approval_denied",
+                   Json{{"tool", name}, {"reason", "cancelled"}});
+        return Result<Json>::failure(McpError::make(
+            ErrorCode::InternalError, "approval denied",
+            Json{{"reason", "approval_denied"}}));
+      }
+      if (std::chrono::steady_clock::now() >= approval.deadline) {
+        auditEvent(security, auth, "approval_timeout",
+                   Json{{"tool", name}});
+        return Result<Json>::failure(McpError::make(
+            ErrorCode::InternalError, "approval timed out",
+            Json{{"reason", "approval_timeout"}}));
+      }
+      if (future.wait_for(std::chrono::milliseconds(20)) ==
+          std::future_status::ready) {
+        break;
+      }
+    }
+
+    ApprovalResult approval_result;
+    try {
+      approval_result = future.get();
+    } catch (...) {
+      auditEvent(security, auth, "approval_denied",
+                 Json{{"tool", name}, {"reason", "hook_failed"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "approval denied",
+          Json{{"reason", "approval_denied"}}));
+    }
+    if (!approval_result.approved) {
+      auditEvent(security, auth, "approval_denied",
+                 Json{{"tool", name},
+                      {"reason", approval_result.reason}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "approval denied",
+          Json{{"reason", "approval_denied"}}));
+    }
+  }
   auto progress_token = readProgressToken(params);
   if (!progress_token.hasValue()) {
     return Result<Json>::failure(progress_token.error());
@@ -448,7 +563,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -577,8 +692,8 @@ Result<Json> listResources(IResourceProvider& provider,
                            bool is2026,
                            const std::shared_ptr<CancellationToken>& token,
                            const Json& client_capabilities,
-                           const std::string& session_id) {
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+                           const std::string& session_id, const AuthContext& auth) {
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -594,8 +709,8 @@ Result<Json> listResourceTemplates(IResourceProvider& provider,
                                    bool is2026,
                                    const std::shared_ptr<CancellationToken>& token,
                                    const Json& client_capabilities,
-                                   const std::string& session_id) {
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+                                   const std::string& session_id, const AuthContext& auth) {
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   auto page = provider.templates(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -611,8 +726,8 @@ Result<Json> listPrompts(IPromptProvider& provider,
                          bool is2026,
                          const std::shared_ptr<CancellationToken>& token,
                          const Json& client_capabilities,
-                         const std::string& session_id) {
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+                         const std::string& session_id, const AuthContext& auth) {
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -627,7 +742,7 @@ Result<Json> readResource(IResourceProvider& provider,
                           const Message& request, bool is2026,
                           const std::shared_ptr<CancellationToken>& token,
                           const Json& client_capabilities,
-                          const std::string& session_id) {
+                          const std::string& session_id, const AuthContext& auth, const SecurityHooks& security) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "resources/read params must be an object"));
@@ -645,12 +760,31 @@ Result<Json> readResource(IResourceProvider& provider,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
+  const std::string uri = params.at("uri").get<std::string>();
+  if (security.authorizer != nullptr) {
+    Status allowed;
+    try {
+      allowed = security.authorizer->authorize(auth, uri);
+    } catch (...) {
+      allowed = Status::failure(McpError::make(
+          ErrorCode::InternalError, "authorization failed"));
+    }
+    if (!allowed) {
+      auditEvent(security, auth, "authorization_denied",
+                 Json{{"uri", uri}, {"reason", "forbidden"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "forbidden",
+          Json{{"reason", "forbidden"}}));
+    }
+  }
+  auditEvent(security, auth, "resource_read", Json{{"uri", uri}});
+
   try {
-    auto outcome = provider.read(params.at("uri").get<std::string>(), context);
+    auto outcome = provider.read(uri, context);
     if (!outcome.hasValue()) {
       return Result<Json>::failure(outcome.error());
     }
@@ -691,7 +825,7 @@ Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
                        bool is2026,
                        const std::shared_ptr<CancellationToken>& token,
                        const Json& client_capabilities,
-                       const std::string& session_id) {
+                       const std::string& session_id, const AuthContext& auth, const SecurityHooks& security) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "prompts/get params must be an object"));
@@ -717,13 +851,33 @@ Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token, client_capabilities, session_id);
+  RequestContext context = makeContext(request, token, client_capabilities, session_id, auth);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
+  const std::string prompt_name = params.at("name").get<std::string>();
+  if (security.authorizer != nullptr) {
+    Status allowed;
+    try {
+      allowed = security.authorizer->authorize(auth, prompt_name);
+    } catch (...) {
+      allowed = Status::failure(McpError::make(
+          ErrorCode::InternalError, "authorization failed"));
+    }
+    if (!allowed) {
+      auditEvent(security, auth, "authorization_denied",
+                 Json{{"prompt", prompt_name}, {"reason", "forbidden"}});
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "forbidden",
+          Json{{"reason", "forbidden"}}));
+    }
+  }
+  auditEvent(security, auth, "prompt_get",
+             Json{{"prompt", prompt_name}});
+
   try {
     auto outcome =
-        provider.get(params.at("name").get<std::string>(), arguments, context);
+        provider.get(prompt_name, arguments, context);
     if (!outcome.hasValue()) {
       return Result<Json>::failure(outcome.error());
     }
@@ -765,7 +919,7 @@ std::optional<Message> Dispatcher::dispatch(
     const Message& request, const std::string& protocolVersion,
     const NotificationSink& notify,
     std::shared_ptr<CancellationToken> token, std::string sessionId,
-    Json request_client_capabilities) {
+    Json request_client_capabilities, AuthContext auth) {
   if (request.kind == MessageKind::Response) {
     return std::nullopt;
   }
@@ -781,6 +935,12 @@ std::optional<Message> Dispatcher::dispatch(
   response.id = request.id;
 
   try {
+    SecurityHooks security;
+    security.authorizer = config_.authorizer;
+    security.approval = config_.approval;
+    security.audit = config_.audit;
+    security.approvalTimeout = config_.approvalTimeout;
+    security.onError = config_.onError;
     bool rejected = false;
     Json client_capabilities = std::move(request_client_capabilities);
     if (!client_capabilities.is_object()) {
@@ -890,7 +1050,7 @@ std::optional<Message> Dispatcher::dispatch(
       }
     } else if (request.method == "tools/call") {
       auto called = callTool(registry_, request, is2026, notify, token,
-                        client_capabilities, sessionId);
+                        client_capabilities, sessionId, auth, security);
       if (!called.hasValue()) {
         response.error = called.error();
       } else {
@@ -925,7 +1085,7 @@ std::optional<Message> Dispatcher::dispatch(
               "completion ref must be ref/prompt or ref/resource");
         } else {
           RequestContext context =
-              makeContext(request, token, client_capabilities, sessionId);
+              makeContext(request, token, client_capabilities, sessionId, auth);
           Result<Json> completion =
               Result<Json>(Json{{"values", Json::array()}});
           if (config_.completions != nullptr) {
@@ -957,7 +1117,7 @@ std::optional<Message> Dispatcher::dispatch(
           } else {
             auto result =
                 listResources(*resources_, request, cursor.value(), is2026, token,
-                                client_capabilities, sessionId);
+                                client_capabilities, sessionId, auth);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -976,7 +1136,7 @@ std::optional<Message> Dispatcher::dispatch(
           } else {
             auto result = listResourceTemplates(*resources_, request,
                                                 cursor.value(), is2026, token,
-                                                client_capabilities, sessionId);
+                                                client_capabilities, sessionId, auth);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -990,7 +1150,7 @@ std::optional<Message> Dispatcher::dispatch(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
           auto result = readResource(*resources_, request, is2026, token,
-                           client_capabilities, sessionId);
+                           client_capabilities, sessionId, auth, security);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {
@@ -1008,7 +1168,7 @@ std::optional<Message> Dispatcher::dispatch(
           } else {
             auto result =
                 listPrompts(*prompts_, request, cursor.value(), is2026, token,
-                            client_capabilities, sessionId);
+                            client_capabilities, sessionId, auth);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -1022,7 +1182,7 @@ std::optional<Message> Dispatcher::dispatch(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
           auto result = getPrompt(*prompts_, request, is2026, token,
-                       client_capabilities, sessionId);
+                       client_capabilities, sessionId, auth, security);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {

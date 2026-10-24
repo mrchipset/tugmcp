@@ -291,6 +291,19 @@
 
 **后果**：2025 与 2026 的 logging/subscription wire 分离；2025 conformance 必需场景清零前 Gate 3 不关闭。
 
+## D20 — M5 安全 hooks（auth / authorizer / approval / audit）
+
+**决策**：
+1. 新增公共头 `security.hpp`：`AuthContext{bool authenticated; std::string principal; std::vector<std::string> roles; Json attributes;}`、`Headers`、`IAuthenticator`、`IAuthorizer`、`ApprovalRequest/ApprovalResult`、`IApprovalHook`、`IAuditHook`（类型见 §18）。
+2. **认证在 transport**：`ServerOptions::auth` 由 `McpServer` 在 `start()` 前推送到 transport（`ITransport::setAuthenticator`）；HTTP 用请求头调用，失败 → HTTP 401 + JSON-RPC error `data.reason="unauthorized"`（保留 id，body 可解析时）。stdio 无头，默认不启用认证。
+3. **授权在 dispatcher**：`IAuthorizer::authorize(auth, toolOrResource)` 在 `tools/call`/`resources/read`/`prompts/get` 前调用；拒绝 → JSON-RPC `-32603` + `data.reason="forbidden"`，HTTP 403。
+4. **审批在授权后**：仅 `tools/call`；`IApprovalHook::approve(ApprovalRequest)` 返回 future；等待受超时（默认 30s）与 `CancellationToken` 约束；拒绝 → `-32603` + `data.reason="approval_denied"`，超时 `approval_timeout`，HTTP 403。
+5. **审计**：`IAuditHook::onEvent(auth, event, detail)`；事件至少 `tool_call`/`resource_read`/`prompt_get`/`authorization_denied`/`approval_denied`/`approval_timeout`/`auth_failed`。实现异常必须被库收敛：`onError` 上报 `-32603` + `data.reason="audit_failed"`，请求继续（审计不是鉴权，不改变放行结果）。
+6. `RequestContext` 增加 `AuthContext auth`；`MessageMetadata` 增加 `AuthContext auth`，由 transport 填、dispatcher 转。
+7. 库仍**不声称**保证设备/宿主安全；只有 hooks 与失败语义。
+
+**后果**：默认 hooks 为 null，现有 2025/2026 conformance 行为不变；安全失败路径必须有测试（401/403、审批拒绝/超时、审计抛异常）。legacy 传输同享 auth hook（P4）。
+
 ## 变更流程
 
 1. 提 ADR 变更：写清背景、替代方案、影响（API/wire/ABI/测试）。

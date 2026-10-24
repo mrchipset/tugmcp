@@ -86,6 +86,8 @@ public:
       std::function<void(const std::string&)> handler) override;
   bool supportsStreaming() const override { return true; }
   void setSupportedVersions(std::vector<std::string> versions) override;
+  void setAuthenticator(std::shared_ptr<IAuthenticator> authenticator) override;
+  void setAuditHook(std::shared_ptr<IAuditHook> audit) override;
   void close() override;
 
   int boundPort() const;

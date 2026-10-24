@@ -15,6 +15,7 @@
 #include <tugmcp/executor.hpp>
 #include <tugmcp/prompt.hpp>
 #include <tugmcp/resource.hpp>
+#include <tugmcp/security.hpp>
 #include <tugmcp/schema.hpp>
 #include <tugmcp/time_source.hpp>
 #include <tugmcp/tool.hpp>
@@ -36,6 +37,11 @@ struct ServerOptions {
   std::shared_ptr<IResourceProvider> resources;
   std::shared_ptr<IPromptProvider> prompts;
   std::shared_ptr<ICompletionProvider> completions;
+  std::shared_ptr<IAuthenticator> auth;
+  std::shared_ptr<IAuthorizer> authorizer;
+  std::shared_ptr<IApprovalHook> approval;
+  std::shared_ptr<IAuditHook> audit;
+  std::chrono::milliseconds approvalTimeout{30000};
 
   // Schema validation policy. With no validator and a tool that declares an
   // inputSchema, registration fails unless allowUnvalidatedTools is true.

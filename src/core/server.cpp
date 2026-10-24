@@ -156,6 +156,14 @@ Status McpServer::run() {
   config.supportedVersions = options_.supportedVersions;
   config.supportsSubscriptions = transport_->supportsStreaming();
   config.completions = options_.completions.get();
+  config.authorizer = options_.authorizer.get();
+  config.approval = options_.approval.get();
+  config.audit = options_.audit.get();
+  config.approvalTimeout = options_.approvalTimeout;
+  config.onError = [this](McpError error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_error_ = std::move(error);
+  };
   // Declared before the cleanup guard so queued tasks always see a live
   // dispatcher: guard cleanup drains the executor before this object dies.
   Dispatcher dispatcher(tools_, options_.resources.get(),
@@ -619,11 +627,13 @@ Status McpServer::run() {
                complete, message = std::move(message), route,
                protocol_version, token,
                session_id = std::string(metadata.sessionId),
-               client_capabilities = Json(metadata.clientCapabilities)]() mutable {
+               client_capabilities = Json(metadata.clientCapabilities),
+               auth = AuthContext(metadata.auth)]() mutable {
                 try {
                   auto response = dispatcher.dispatch(
                       message, protocol_version, notify, token, session_id,
-                      std::move(client_capabilities));
+                      std::move(client_capabilities),
+                      std::move(auth));
                   if (response.has_value()) {
                     send_response(route, *response);
                   }
@@ -691,6 +701,8 @@ Status McpServer::run() {
         [this](const std::string& id) { handleSessionClosed(id); });
 
     transport_->setSupportedVersions(options_.supportedVersions);
+    transport_->setAuthenticator(options_.auth);
+    transport_->setAuditHook(options_.audit);
     Status started = transport_->start();
     if (!started) {
       return started;

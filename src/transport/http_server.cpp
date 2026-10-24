@@ -34,6 +34,14 @@ bool isJsonContentType(const std::string& value) {
   return value.find("application/json") != std::string::npos;
 }
 
+Headers collectHeaders(const httplib::Request& request) {
+  Headers headers;
+  for (const auto& item : request.headers) {
+    headers[item.first] = item.second;
+  }
+  return headers;
+}
+
 bool acceptsEventStream(const httplib::Request& request) {
   return request.get_header_value("Accept").find("text/event-stream") !=
          std::string::npos;
@@ -144,6 +152,59 @@ public:
   explicit Impl(StreamableHttpServerOptions options)
       : options_(std::move(options)),
         supported_versions_(options_.supportedVersions) {}
+
+  void setAuthenticator(std::shared_ptr<IAuthenticator> authenticator) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    authenticator_ = std::move(authenticator);
+  }
+
+  void setAuditHook(std::shared_ptr<IAuditHook> audit) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    audit_ = std::move(audit);
+  }
+
+  AuthContext authenticate(const httplib::Request& request,
+                              bool& failed) {
+    failed = false;
+    std::shared_ptr<IAuthenticator> authenticator;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      authenticator = authenticator_;
+    }
+    if (!authenticator) {
+      return AuthContext{};
+    }
+    try {
+      auto result = authenticator->authenticate(collectHeaders(request));
+      if (!result.hasValue()) {
+        failed = true;
+        return AuthContext{};
+      }
+      return result.value();
+    } catch (...) {
+      failed = true;
+      return AuthContext{};
+    }
+  }
+
+  void auditAuthFailed() noexcept {
+    std::shared_ptr<IAuditHook> audit;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      audit = audit_;
+    }
+    if (!audit) {
+      return;
+    }
+    try {
+      audit->onEvent(AuthContext{}, "auth_failed",
+                     Json{{"reason", "unauthorized"}});
+    } catch (...) {
+      reportError(McpError::make(
+          ErrorCode::InternalError, "audit hook failed",
+          Json{{"reason", "audit_failed"}}));
+    }
+  }
 
   void setSupportedVersions(std::vector<std::string> versions) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -749,6 +810,17 @@ private:
         response.status = 403;
         return;
       }
+      bool auth_failed = false;
+      (void)authenticate(request, auth_failed);
+      if (auth_failed) {
+        auditAuthFailed();
+        respondError(response, 401,
+                     McpError::make(
+                         ErrorCode::InternalError, "unauthorized",
+                         Json{{"reason", "unauthorized"}}),
+                     nullptr);
+        return;
+      }
       const std::string version =
           request.get_header_value("MCP-Protocol-Version");
       if (version == "2026-07-28") {
@@ -867,6 +939,17 @@ private:
           !originAllowed(request.get_header_value("Origin"),
                          options_.allowedOrigins)) {
         response.status = 403;
+        return;
+      }
+      bool auth_failed = false;
+      (void)authenticate(request, auth_failed);
+      if (auth_failed) {
+        auditAuthFailed();
+        respondError(response, 401,
+                     McpError::make(
+                         ErrorCode::InternalError, "unauthorized",
+                         Json{{"reason", "unauthorized"}}),
+                     nullptr);
         return;
       }
       const std::string version =
@@ -1223,6 +1306,26 @@ private:
         return;
       }
 
+      bool auth_failed = false;
+      const AuthContext auth_context = authenticate(request, auth_failed);
+      if (auth_failed) {
+        auditAuthFailed();
+        Json request_id = nullptr;
+        try {
+          auto decoded = decode(request.body);
+          if (decoded.hasValue()) {
+            request_id = decoded.value().id.toJson();
+          }
+        } catch (...) {
+        }
+        respondError(response, 401,
+                     McpError::make(
+                         ErrorCode::InternalError, "unauthorized",
+                         Json{{"reason", "unauthorized"}}),
+                     request_id);
+        return;
+      }
+
       const std::string content_type =
           request.get_header_value("Content-Type");
       if (!isJsonContentType(content_type)) {
@@ -1387,6 +1490,7 @@ private:
           metadata.protocolVersion = version;
           metadata.sessionId = session_id;
           metadata.clientCapabilities = client_capabilities;
+          metadata.auth = auth_context;
           metadata.emergency = emergency;
           invokeMessage(document, metadata);
         }
@@ -1429,6 +1533,7 @@ private:
         metadata.route = route;
         metadata.sessionId = session_id;
           metadata.clientCapabilities = client_capabilities;
+          metadata.auth = auth_context;
         metadata.emergency = emergency;
         const bool invoked = invokeMessage(document, metadata);
         erasePending(route);
@@ -1485,6 +1590,7 @@ private:
         metadata.route = route;
         metadata.sessionId = session_id;
           metadata.clientCapabilities = client_capabilities;
+          metadata.auth = auth_context;
         metadata.emergency = emergency;
         if (!invokeMessage(document, metadata)) {
           const McpError error = McpError::make(
@@ -1516,6 +1622,7 @@ private:
       metadata.route = route;
       metadata.sessionId = session_id;
           metadata.clientCapabilities = client_capabilities;
+          metadata.auth = auth_context;
       metadata.emergency = emergency;
       if (!invokeMessage(document, metadata)) {
         erasePending(route);
@@ -1573,16 +1680,27 @@ private:
       }
 
       int response_status = 200;
-      if (version == "2026-07-28" && body.is_object() &&
-          body.contains("error") && body.at("error").is_object() &&
-          body.at("error").contains("code") &&
-          body.at("error").at("code").is_number_integer()) {
-        const int code = body.at("error").at("code").get<int>();
-        if (code == -32601) {
-          response_status = 404;
-        } else if (code == -32602 || code == -32020 ||
-                   code == -32021 || code == -32022) {
-          response_status = 400;
+      if (body.is_object() && body.contains("error") &&
+          body.at("error").is_object()) {
+        const Json& error = body.at("error");
+        std::string reason;
+        if (error.contains("data") && error.at("data").is_object() &&
+            error.at("data").contains("reason") &&
+            error.at("data").at("reason").is_string()) {
+          reason = error.at("data").at("reason").get<std::string>();
+        }
+        if (reason == "forbidden" || reason == "approval_denied" ||
+            reason == "approval_timeout") {
+          response_status = 403;
+        } else if (version == "2026-07-28" && error.contains("code") &&
+                   error.at("code").is_number_integer()) {
+          const int code = error.at("code").get<int>();
+          if (code == -32601) {
+            response_status = 404;
+          } else if (code == -32602 || code == -32020 ||
+                     code == -32021 || code == -32022) {
+            response_status = 400;
+          }
         }
       }
       respondJson(response, response_status, body);
@@ -1598,6 +1716,8 @@ private:
 
   mutable std::mutex lifecycle_mutex_;
   std::vector<std::string> supported_versions_;
+  std::shared_ptr<IAuthenticator> authenticator_;
+  std::shared_ptr<IAuditHook> audit_;
   bool started_ = false;
   std::thread listen_thread_;
   std::atomic<int> bound_port_{0};
@@ -1672,6 +1792,16 @@ void HttpServerTransport::setOnRouteClosed(
 void HttpServerTransport::setSupportedVersions(
     std::vector<std::string> versions) {
   impl_->setSupportedVersions(std::move(versions));
+}
+
+void HttpServerTransport::setAuthenticator(
+    std::shared_ptr<IAuthenticator> authenticator) {
+  impl_->setAuthenticator(std::move(authenticator));
+}
+
+void HttpServerTransport::setAuditHook(
+    std::shared_ptr<IAuditHook> audit) {
+  impl_->setAuditHook(std::move(audit));
 }
 
 void HttpServerTransport::setOnSessionClosed(

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "error.hpp"
+#include "security.hpp"
 #include "message.hpp"
 
 namespace mcp {
@@ -21,6 +22,7 @@ struct MessageMetadata {
   std::string route;
   std::string sessionId;
   Json clientCapabilities;
+  AuthContext auth;
   bool emergency = false;
 };
 
@@ -63,6 +65,10 @@ public:
   // sends it in 2026 (Auto maps to CloseStream), and server-side matching is
   // best-effort by id across routes.
   virtual void cancelPending(const RequestId&) {}
+
+  // Install security hooks (server transports).
+  virtual void setAuthenticator(std::shared_ptr<IAuthenticator>) {}
+  virtual void setAuditHook(std::shared_ptr<IAuditHook>) {}
 
   // Supported protocol versions for server-side negotiation (HTTP).
   virtual void setSupportedVersions(std::vector<std::string>) {}
