@@ -1,55 +1,44 @@
-# 外部 MCP 互操作与 conformance 测试记录
+﻿# 澶栭儴 MCP 浜掓搷浣滀笌 conformance 娴嬭瘯璁板綍
 
-> 日期：2026-10-24
-> 代码基线：`4c7d150`（feat(examples): add Streamable HTTP mode to echo server）
-> 目的：记录首次使用**外部 MCP 客户端/官方 conformance 套件**的测试结果，作为 2026-07-28 协议对齐与 P4 的输入。
-> 本文是测试证据，不是设计权威；wire 决策见 `designs/protocol-decisions.md` D18。
+> 鏃ユ湡锛?026-10-24
+> 浠ｇ爜鍩虹嚎锛歚4c7d150`锛坒eat(examples): add Streamable HTTP mode to echo server锛?> 鐩殑锛氳褰曢娆′娇鐢?*澶栭儴 MCP 瀹㈡埛绔?瀹樻柟 conformance 濂椾欢**鐨勬祴璇曠粨鏋滐紝浣滀负 2026-07-28 鍗忚瀵归綈涓?P4 鐨勮緭鍏ャ€?> 鏈枃鏄祴璇曡瘉鎹紝涓嶆槸璁捐鏉冨▉锛泈ire 鍐崇瓥瑙?`designs/protocol-decisions.md` D18銆?
+## 1. 鐜
 
-## 1. 环境
-
-| 项 | 值 |
+| 椤?| 鍊?|
 |---|---|
 | OS | Windows 10.0.26100 x64 |
-| 编译器 | MSVC 14.42（`/W4 /permissive- /utf-8`） |
+| 缂栬瘧鍣?| MSVC 14.42锛坄/W4 /permissive- /utf-8`锛?|
 | CMake | 4.2.1 |
-| Node / npm | v22.13.1 / 11.3.0（registry: `https://registry.npmmirror.com`） |
-| MCP Inspector | `@modelcontextprotocol/inspector@2.12.0`（CLI 模式） |
+| Node / npm | v22.13.1 / 11.3.0锛坮egistry: `https://registry.npmmirror.com`锛?|
+| MCP Inspector | `@modelcontextprotocol/inspector@2.12.0`锛圕LI 妯″紡锛?|
 | MCP Conformance | `@modelcontextprotocol/conformance@0.2.0-alpha.12` |
-| 被测 server | `build/examples/Debug/tugmcp_echo_server.exe`（仅 `echo` 工具），stdio 与 `--http` 两种模式 |
-| 本库测试基线 | TLS=OFF 237/237；TLS=ON 238/238；schema 191/191 |
+| 琚祴 server | `build/examples/Debug/tugmcp_echo_server.exe`锛堜粎 `echo` 宸ュ叿锛夛紝stdio 涓?`--http` 涓ょ妯″紡 |
+| 鏈簱娴嬭瘯鍩虹嚎 | TLS=OFF 237/237锛汿LS=ON 238/238锛泂chema 191/191 |
 
-Inspector 2.12.0 声明 Node ≥22.19；本机 22.13.1 仅 `EBADENGINE` 警告，CLI 实际可用。
-
-## 2. MCP Inspector（外部客户端）
-
-全部通过：
-
-| 传输 | 操作 | 结果 |
+Inspector 2.12.0 澹版槑 Node 鈮?2.19锛涙湰鏈?22.13.1 浠?`EBADENGINE` 璀﹀憡锛孋LI 瀹為檯鍙敤銆?
+## 2. MCP Inspector锛堝閮ㄥ鎴风锛?
+鍏ㄩ儴閫氳繃锛?
+| 浼犺緭 | 鎿嶄綔 | 缁撴灉 |
 |---|---|---|
-| stdio | `initialize` + `tools/list` | 返回 `echo` 工具 |
-| stdio | `tools/call`（`text=hello`） | 返回 text content + structuredContent |
-| HTTP 2025 session | `initialize`（服务端返回 `MCP-Session-Id`） | 通过 |
-| HTTP 2025 session | `tools/list` | 返回 `echo` |
-| HTTP 2025 session | `tools/call`（`text=hello-http`） | 返回 text content + structuredContent |
+| stdio | `initialize` + `tools/list` | 杩斿洖 `echo` 宸ュ叿 |
+| stdio | `tools/call`锛坄text=hello`锛?| 杩斿洖 text content + structuredContent |
+| HTTP 2025 session | `initialize`锛堟湇鍔＄杩斿洖 `MCP-Session-Id`锛?| 閫氳繃 |
+| HTTP 2025 session | `tools/list` | 杩斿洖 `echo` |
+| HTTP 2025 session | `tools/call`锛坄text=hello-http`锛?| 杩斿洖 text content + structuredContent |
 
-结论：2025 的 stdio 与 Streamable HTTP 基本握手、session、工具调用可被独立客户端消费。
-
-复现：
-
+缁撹锛?025 鐨?stdio 涓?Streamable HTTP 鍩烘湰鎻℃墜銆乻ession銆佸伐鍏疯皟鐢ㄥ彲琚嫭绔嬪鎴风娑堣垂銆?
+澶嶇幇锛?
 ```powershell
 $exe = (Resolve-Path 'build\examples\Debug\tugmcp_echo_server.exe').Path
 npx -y @modelcontextprotocol/inspector@2.12.0 --cli $exe --method tools/list
 npx -y @modelcontextprotocol/inspector@2.12.0 --cli $exe --method tools/call --tool-name echo --tool-arg text=hello
 
-# HTTP（先启动 --http --port 18081）
-npx -y @modelcontextprotocol/inspector@2.12.0 --cli `
+# HTTP锛堝厛鍚姩 --http --port 18081锛?npx -y @modelcontextprotocol/inspector@2.12.0 --cli `
   --server-url http://127.0.0.1:18081/mcp --transport http --method tools/list
 ```
 
-## 3. 官方 conformance（2026-07-28）
-
-命令：
-
+## 3. 瀹樻柟 conformance锛?026-07-28锛?
+鍛戒护锛?
 ```powershell
 $exe = (Resolve-Path 'build\examples\Debug\tugmcp_echo_server.exe').Path
 $p = Start-Process -FilePath $exe -ArgumentList '--http','--port','18083' -PassThru `
@@ -61,59 +50,53 @@ npx -y @modelcontextprotocol/conformance@0.2.0-alpha.12 server `
 Stop-Process -Id $p.Id -Force
 ```
 
-结果：**79 passed / 88 failed**（50 scenarios；含 extension/pending 不计分项）。结果目录 `build/conformance-2026-echo/`（构建产物，不入库）。
+缁撴灉锛?*79 passed / 88 failed**锛?0 scenarios锛涘惈 extension/pending 涓嶈鍒嗛」锛夈€傜粨鏋滅洰褰?`build/conformance-2026-echo/`锛堟瀯寤轰骇鐗╋紝涓嶅叆搴擄級銆?
+### 3.1 蹇呴』淇殑鐪熷疄鍗忚鍋忓樊
 
-### 3.1 必须修的真实协议偏差
-
-| # | check id | 期望 | 实际 |
+| # | check id | 鏈熸湜 | 瀹為檯 |
 |---|---|---|---|
-| 1 | `sep-2575-request-meta-invalid-missing-meta` | `-32602` + HTTP 400 | 200，正常结果 |
-| 2 | `sep-2575-request-meta-invalid-missing-protocol-version` | `-32602` + HTTP 400 | 200，正常结果 |
-| 3 | `sep-2575-request-meta-invalid-missing-client-capabilities` | `-32602` + HTTP 400 | 200，正常结果 |
+| 1 | `sep-2575-request-meta-invalid-missing-meta` | `-32602` + HTTP 400 | 200锛屾甯哥粨鏋?|
+| 2 | `sep-2575-request-meta-invalid-missing-protocol-version` | `-32602` + HTTP 400 | 200锛屾甯哥粨鏋?|
+| 3 | `sep-2575-request-meta-invalid-missing-client-capabilities` | `-32602` + HTTP 400 | 200锛屾甯哥粨鏋?|
 | 4 | `sep-2575-http-server-header-mismatch-400` | HTTP 400 + `-32020` | 200 |
-| 5 | `sep-2575-server-unsupported-version-error` | `-32022`，`error.data.supported` 数组 + `requested` 回显 | 结构不匹配 |
-| 6 | `sep-2575-http-server-error-jsonrpc-id` | 错误回显请求 id（301） | `id:null` |
-| 7 | `sep-2575-http-server-method-not-found-404-initialize` | 404 + `-32601` | 200，成功 |
-| 8 | `sep-2575-http-server-method-not-found-404-ping` | 404 + `-32601` | 200，成功 |
+| 5 | `sep-2575-server-unsupported-version-error` | `-32022`锛宍error.data.supported` 鏁扮粍 + `requested` 鍥炴樉 | 缁撴瀯涓嶅尮閰?|
+| 6 | `sep-2575-http-server-error-jsonrpc-id` | 閿欒鍥炴樉璇锋眰 id锛?01锛?| `id:null` |
+| 7 | `sep-2575-http-server-method-not-found-404-initialize` | 404 + `-32601` | 200锛屾垚鍔?|
+| 8 | `sep-2575-http-server-method-not-found-404-ping` | 404 + `-32601` | 200锛屾垚鍔?|
 | 9 | `sep-2575-http-server-method-not-found-404-logging-setlevel` | 404 + `-32601` | 200 + `-32601` |
 | 10 | `sep-2575-http-server-method-not-found-404-resources-subscribe` | 404 + `-32601` | 200 + `-32601` |
 | 11 | `sep-2575-http-server-method-not-found-404-resources-unsubscribe` | 404 + `-32601` | 200 + `-32601` |
-| 12 | `sep-2575-http-server-method-not-found-404`（未知方法） | 404 + `-32601` | 200 + `-32601` |
-| 13 | `sep-2575-server-identifies-in-result-meta` | result `_meta["io.modelcontextprotocol/serverInfo"]`（SHOULD） | 仅顶层 `serverInfo`（warning） |
-| 14 | `sep-2575-server-tags-subscription-id` | 通知 `params._meta["io.modelcontextprotocol/subscriptionId"]` | 顶层 `subscriptionId` |
-| 15 | `localhost-host-rebinding-rejected` | 非法 Host/Origin → 4xx | 200 |
+| 12 | `sep-2575-http-server-method-not-found-404`锛堟湭鐭ユ柟娉曪級 | 404 + `-32601` | 200 + `-32601` |
+| 13 | `sep-2575-server-identifies-in-result-meta` | result `_meta["io.modelcontextprotocol/serverInfo"]`锛圫HOULD锛?| 浠呴《灞?`serverInfo`锛坵arning锛?|
+| 14 | `sep-2575-server-tags-subscription-id` | 閫氱煡 `params._meta["io.modelcontextprotocol/subscriptionId"]` | 椤跺眰 `subscriptionId` |
+| 15 | `localhost-host-rebinding-rejected` | 闈炴硶 Host/Origin 鈫?4xx | 200 |
 | 16 | `completion-complete` | `{completion:{values:[]}}` | `-32601` |
-| 17 | `sep-2575-server-sends-tools-list-changed-on-subscription` | 变更后 `notifications/tools/list_changed`（SHOULD） | 未发送（warning） |
+| 17 | `sep-2575-server-sends-tools-list-changed-on-subscription` | 鍙樻洿鍚?`notifications/tools/list_changed`锛圫HOULD锛?| 鏈彂閫侊紙warning锛?|
 
-关键规范细节（来自 conformance 0.2.0-alpha.12 的 schema/scenario）：
+鍏抽敭瑙勮寖缁嗚妭锛堟潵鑷?conformance 0.2.0-alpha.12 鐨?schema/scenario锛夛細
 
-- 2026 请求 `params._meta` **必须**含 `io.modelcontextprotocol/protocolVersion` 与 `io.modelcontextprotocol/clientCapabilities`；`clientInfo` 为 SHOULD；`progressToken` 仍是普通键；日志级别键为 `io.modelcontextprotocol/logLevel`。
-- 2026 移除 `initialize`/`ping`/`logging/setLevel`/`resources/subscribe`/`resources/unsubscribe`；未知方法同样 404 + `-32601`。
-- 版本不支持：`-32022`，`data.requested` 回显，`data.supported` 为支持版本数组；HTTP 400。
-- 订阅：请求 filter 为 `params.notifications.{toolsListChanged,promptsListChanged,resourcesListChanged,...}`；ack 首帧，`params._meta.subscriptionId` 等于 `subscriptions/listen` 的 JSON-RPC id；所有流通知带同一 `_meta.subscriptionId`；不再使用顶层 `subscriptionId`/`requestId`。
-- `completion/complete` 属 2026 必需场景；最小空数组即可通过，但必须声明 `completions` capability 并可响应。
+- 2026 璇锋眰 `params._meta` **蹇呴』**鍚?`io.modelcontextprotocol/protocolVersion` 涓?`io.modelcontextprotocol/clientCapabilities`锛沗clientInfo` 涓?SHOULD锛沗progressToken` 浠嶆槸鏅€氶敭锛涙棩蹇楃骇鍒敭涓?`io.modelcontextprotocol/logLevel`銆?- 2026 绉婚櫎 `initialize`/`ping`/`logging/setLevel`/`resources/subscribe`/`resources/unsubscribe`锛涙湭鐭ユ柟娉曞悓鏍?404 + `-32601`銆?- 鐗堟湰涓嶆敮鎸侊細`-32022`锛宍data.requested` 鍥炴樉锛宍data.supported` 涓烘敮鎸佺増鏈暟缁勶紱HTTP 400銆?- 璁㈤槄锛氳姹?filter 涓?`params.notifications.{toolsListChanged,promptsListChanged,resourcesListChanged,...}`锛沘ck 棣栧抚锛宍params._meta.subscriptionId` 绛変簬 `subscriptions/listen` 鐨?JSON-RPC id锛涙墍鏈夋祦閫氱煡甯﹀悓涓€ `_meta.subscriptionId`锛涗笉鍐嶄娇鐢ㄩ《灞?`subscriptionId`/`requestId`銆?- `completion/complete` 灞?2026 蹇呴渶鍦烘櫙锛涙渶灏忕┖鏁扮粍鍗冲彲閫氳繃锛屼絾蹇呴』澹版槑 `completions` capability 骞跺彲鍝嶅簲銆?
+### 3.2 宸查€氳繃鐨勪俊鍙?
+- `tools-list` 3/3锛沗server-sse-multiple-streams` 1/1锛沗sep-2164-resource-not-found` 2/2锛?- `http-header-validation` 14/14锛坧ending 椤癸級锛?- MRTR 缁撴瀯瀛愰泦锛歚missing-input-response`銆乣unsupported-methods`銆乣ignore-extra-params`銆乣validate-input`锛?- `caching` 鐨?`tools/list` hints銆?
+### 3.3 Fixture 缂哄彛锛堜笉鏄簱 bug锛?
+褰撳墠 echo server 鍙湁 `echo`锛岃€?conformance 鏈熸湜娴嬭瘯璧勪骇锛?
+- `test_simple_text`銆乣test_image_content`銆乣test_audio_content`銆乣test_embedded_resource`銆乣test_mixed_content`銆乣test_error`銆乣test_progress`锛?- `test_missing_capability`銆乣test_streaming_elicitation`銆乣test_logging_tool`锛?- `test_trigger_tool_change`銆乣test_trigger_prompt_change`锛?- resources/read锛坱ext/binary锛夈€乺esources/templates銆乸rompts锛坰imple/args/embedded/image锛夈€丮RTR 澶氳疆绛夈€?
+鍥犳 `resources-*`銆乣prompts-*`銆乣tools-call-*`銆乣input-required-*` 鐨勫ぇ閲忓け璐ュ睘 fixture 涓嶈冻锛涘繀椤诲湪娴嬭瘯渚ф彁渚涗笓鐢?conformance fixture server锛屼笉鑳界敤鐢熶骇 example 浠ｆ浛銆?
+## 4. 闄愬埗涓庡悗缁?
+- 瀹樻柟 conformance 鐨?`server` 瀛愬懡浠ゅ彧鎺ュ彈 `--url`锛圚TTP/SSE锛夛紝**涓嶆敮鎸?stdio command**锛泂tdio 澶栭儴楠岃瘉鐩墠鐢?Inspector銆俙designs/testing.md` 搂8.4 鐨?runner 闇€鎸夋鐜板疄淇銆?- `tasks-*` 涓?extension锛宍json-schema-2020-12`/`http-header-validation` 绛変负 pending/draft锛屾湰娆′笉璁″垎銆?- 澶栭儴濂椾欢缁撴灉鍙啓鍏?`build/`锛屼笉姹℃煋婧愮爜鏍戙€?- 涓嬩竴姝ワ細鍏堟寜 D18 淇湡瀹炲亸宸紝鍐嶅缓 conformance fixture server锛岄噸璺?`--requirements 2026-07-28` 涓?`2025-11-25`锛岀洿鍒板繀闇€鍦烘櫙鐪熷疄澶辫触娓呴浂锛涚劧鍚庤繘鍏?P4銆?
+## 5. 最终状态（2026-10-25）
 
-### 3.2 已通过的信号
+首轮问题已全部关闭或明确归入后续 backlog：
 
-- `tools-list` 3/3；`server-sse-multiple-streams` 1/1；`sep-2164-resource-not-found` 2/2；
-- `http-header-validation` 14/14（pending 项）；
-- MRTR 结构子集：`missing-input-response`、`unsupported-methods`、`ignore-extra-params`、`validate-input`；
-- `caching` 的 `tools/list` hints。
-
-### 3.3 Fixture 缺口（不是库 bug）
-
-当前 echo server 只有 `echo`，而 conformance 期望测试资产：
-
-- `test_simple_text`、`test_image_content`、`test_audio_content`、`test_embedded_resource`、`test_mixed_content`、`test_error`、`test_progress`；
-- `test_missing_capability`、`test_streaming_elicitation`、`test_logging_tool`；
-- `test_trigger_tool_change`、`test_trigger_prompt_change`；
-- resources/read（text/binary）、resources/templates、prompts（simple/args/embedded/image）、MRTR 多轮等。
-
-因此 `resources-*`、`prompts-*`、`tools-call-*`、`input-required-*` 的大量失败属 fixture 不足；必须在测试侧提供专用 conformance fixture server，不能用生产 example 代替。
-
-## 4. 限制与后续
-
-- 官方 conformance 的 `server` 子命令只接受 `--url`（HTTP/SSE），**不支持 stdio command**；stdio 外部验证目前用 Inspector。`designs/testing.md` §8.4 的 runner 需按此现实修订。
-- `tasks-*` 为 extension，`json-schema-2020-12`/`http-header-validation` 等为 pending/draft，本次不计分。
-- 外部套件结果只写入 `build/`，不污染源码树。
-- 下一步：先按 D18 修真实偏差，再建 conformance fixture server，重跑 `--requirements 2026-07-28` 与 `2025-11-25`，直到必需场景真实失败清零；然后进入 P4。
+- **2026-07-28**：required 37，seen 50，**121 checks，0 failure / 0 unexpected skip**；包含 namespaced `_meta`、removed-method 404、订阅 `_meta.subscriptionId`、completion、Host/Origin。
+- **2025-11-25**：required 31，seen 33，**73 checks，0 failure / 0 unexpected skip**；包含 session lifecycle、logging/setLevel、resources subscribe/unsubscribe、sampling/elicitation。
+- `expected_failures.yaml` 为空；没有任何必需检查被屏蔽。
+- Runner 强制 required⊆seen、已知未计分 ledger、npx 非零即失败、超时清理 fixture。
+- `ctest --test-dir build-conformance -C Debug -R conformance` → 2/2。
+- 相关设计：D18（2026 wire）、D19（2025 logging/subscriptions）、D20（security hooks）；fixture server 仅测试资产（`tests/conformance/`），不随生产库发布。
+- 复现：
+  ```powershell
+  cmake -S . -B build-conformance -DTUGMCP_CONFORMANCE=ON
+  cmake --build build-conformance --config Debug --parallel
+  ctest --test-dir build-conformance -C Debug -R conformance --output-on-failure
+  ```

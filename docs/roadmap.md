@@ -1,6 +1,6 @@
 # 路线图（Roadmap）
 
-> 状态快照：**2026-10-25**（Gate 3 通过；conformance 双版本全绿）
+> 状态快照：**2026-10-25**（M1–M6 完成；Gate 2a/2b/3/4 关闭）
 > 本文是项目进度视图，不是设计权威；与 `designs/` 冲突时以 `designs/` 为准。
 
 ## 1. 里程碑状态
@@ -8,69 +8,63 @@
 | 里程碑 | 状态 | 落地情况 |
 |---|---|---|
 | **M1** core + stdio | **已完成** | strict JSON-RPC、stdio server/client、loopback、vendored 依赖 |
-| **M1.5** schema / canonical / conformance | **已完成** | jsoncons/Valijson、canonical、`tool_schema_hash`；官方 conformance runner + HTTP fixture server；**2026-07-28 121/121，2025-11-25 73/73，0 failure / 0 unexpected skip**；Inspector 2.12 stdio/HTTP 冒烟通过 |
-| **M2** 2026 server + client | **已完成（Gate 2b）** | envelope/分页/resources/prompts/MRTR/progress/订阅/SSE/route 隔离/admission；D18 对齐官方 2026 wire |
-| **M3** 2025 server/session | **已完成（Gate 3）** | session/POST/GET/DELETE/replay/server→client；2025 logging/setLevel、resources subscribe/unsubscribe（D19） |
-| **M4** 2025 client/replay | **已完成（Gate 3）** | session 捕获、GET 流/replay、请求处理、cancel；2026 fallback |
-| **M5** 宿主适配 | 部分 | `IExecutor` 已完成（默认内部池）；缺 auth/authorizer/approval/audit hooks（P4） |
-| **M6** legacy HTTP+SSE | 未开始 | P4 |
+| **M1.5** schema / canonical / conformance | **已完成** | jsoncons/Valijson、canonical、`tool_schema_hash`；官方 conformance fixture+runner；2026 121/121、2025 73/73，0 failure / 0 unexpected skip；Inspector 2.12 stdio/HTTP 冒烟通过 |
+| **M2** 2026 server + client | **已完成（Gate 2b）** | envelope/分页/resources/prompts/MRTR/progress/订阅/SSE/route 隔离/admission；D18 对齐官方 wire |
+| **M3** 2025 server/session | **已完成（Gate 3）** | session/POST/GET/DELETE/replay/server→client；logging/setLevel、resources subscribe/unsubscribe（D19） |
+| **M4** 2025 client/replay | **已完成（Gate 3）** | session、GET 流/replay、请求处理、cancel；2026 fallback |
+| **M5** 宿主适配 | **已完成（Gate 4）** | `IExecutor`（默认内部池）+ `IAuthenticator`/`IAuthorizer`/`IApprovalHook`/`IAuditHook`（D20）；401/403、审批超时/取消、审计异常收敛 |
+| **M6** legacy HTTP+SSE | **已完成（Gate 4）** | `TUGMCP_ENABLE_LEGACY_SSE`（默认 OFF）；server+client、endpoint/messages、batch 仅 legacy、auth/Host-Origin/上限 |
 
-## 2. 关键要素
+## 2. 最终验证（2026-10-25）
 
-| 要素 | 状态 | 备注 |
-|---|---|---|
-| 静态库 / CMake targets | 已完成 | core/http/schema/tests/executor/conformance fixture |
-| 2026 stateless wire | 已完成 | D18：namespaced `_meta`、404 removed methods、订阅 `_meta.subscriptionId`、completion、Host/Origin |
-| 2025 session/logging/subscriptions | 已完成 | D19 |
-| Conformance | 已完成 | `TUGMCP_CONFORMANCE=ON`；2026/2025 两个 ctest；fixture server 仅测试资产 |
-| Inspector 外部验证 | 已完成 | stdio/HTTP initialize+tools/list+tools/call |
-| header-only / 单头 | 未开始 | `TUGMCP_HEADER_ONLY=ON` → FATAL |
-| system deps | 未开始 | FATAL |
-| legacy SSE | 未开始 | P4 |
-| auth/approval/audit hooks | 未开始 | P4 |
-| install/export | 不提供 | 设计 v1 明确不提供 |
-| TLS | 已完成（OpenSSL ≥3.0） | TLS=ON 测试通过；TLS+2025 session 专项待补 |
-| 连接复用 | 未做 | client per-send client（M4/M5 复查） |
+| 构建 | 结果 |
+|---|---|
+| Default Debug | **264/264** |
+| TLS (`TUGMCP_TLS=ON`) | **266/266** |
+| Legacy (`TUGMCP_ENABLE_LEGACY_SSE=ON`) | **272/272** |
+| Schema (`jsoncons+valijson`) | **196/196** |
+| Conformance (`ctest -R conformance`) | **2/2**：2026 121 required checks / 2025 73，均 0 failure / 0 unexpected skip |
+| Inspector 2.12 | stdio/HTTP `initialize` + `tools/list` + `tools/call` 通过 |
 
-## 3. 验证证据
+告警：MSVC `/W4 /permissive- /utf-8` 无新增；仅 vendored `httplib.h` C4702。
 
-- `ctest --test-dir build -C Debug` → **255/255**
-- `ctest --test-dir build-tls -C Debug` → **256/256**
-- schema 构建 → **195/195**
-- `ctest --test-dir build-conformance -C Debug -R conformance` → **2/2**
-  - 2026-07-28：required 37，seen 50，121 checks，0 failure / 0 unexpected skip
-  - 2025-11-25：required 31，seen 33，73 checks，0 failure / 0 unexpected skip
-- 结果目录：`build/conformance/{2026-07-28,2025-11-25}`
-
-## 4. 关键提交
+## 3. 关键提交
 
 | commit | 内容 |
 |---|---|
 | `2f359e0` / `9426a6d` | P2a executor + Gate 2a |
 | `f20220f` … `05df1a3` | P2b：协议面/SSE/client/订阅 |
-| `c32a6bf` / `d7f2e39` | Gate 2b 修补 |
 | `130df65` … `805bbab` | P3：2025 server/client/默认执行器 |
-| `7592c2d` / `44021b6` | Gate 3 修补 |
 | `4c7d150` | echo server HTTP 模式 |
-| `b01ff32` | conformance 报告 + D18 设计对齐 |
-| `52e9f8c` / `62dfd03` | D18 实现 + Gate 2 修补 |
-| `d974dcd` | fixture server + runner；2026/2025 清零 |
-| `7b6e15d` / `02b4587` | Gate 3 修补 + pycache 忽略 |
+| `b01ff32` … `02b4587` | conformance 报告、D18/D19、fixture/runner、2026/2025 清零 |
+| `270e94f` | roadmap：Gate 3 关闭 |
+| `effd6db` / `a43720f` | M5 security hooks / M6 legacy + TLS 2025 |
+| `6d6386f` | Gate 4 修补（legacy auth 隔离、审批超时、订阅授权、legacy 上限/Host-Origin） |
 
-## 5. 已记录偏差
+## 4. 明确不在 v1 / 后续 backlog
 
-1. **D17**：默认执行器为内部 4/1024 线程池；`useInlineExecutor` 可退回同步。
-2. **D18**：2026 `_meta`/订阅/404/错误 id/版本错误/completion/Host-Origin 已对齐；`list_changed` 自动通知与 `_meta.logLevel` 延后 P4。
-3. **D19**：2025 logging 与 per-URI 资源订阅已实现；2026 仍不支持 per-URI。
-4. **conformance runner**：官方 `server` 仅 URL/HTTP；stdio 外部验证用 Inspector；fixture server 仅测试构建。
-5. **per-send HTTP client**：无 keep-alive；订阅流独立 client。
-6. **客户端返回 `Json`**：强类型 outcome 留后续。
-7. **2025 replay**：每 session 单活流 + 256 条；不是多 per-stream。
-8. **TLS+2025**：session/stream 无独立 TLS 用例（P4）。
-9. **header-only / system deps / install**：未实现/不提供。
+1. **2026 `_meta.logLevel` 与自动 list_changed**：延后；当前 2025 logging 已实现，2026 `logging/setLevel` 明确 404。
+2. **Header-only / 单头 amalgamation**：`TUGMCP_HEADER_ONLY=ON` 仍 FATAL。
+3. **`TUGMCP_USE_SYSTEM_DEPS`**：未实现。
+4. **install/export**：设计 v1 明确不提供。
+5. **HTTP client 连接复用**：per-send `httplib::Client`；无 keep-alive/mTLS 复用。
+6. **客户端强类型 outcome**：client 仍返回 `Json`；typed API 留后续。
+7. **legacy client reconnect**：legacy 无重连；POST 在全量 close 后表现为连接失败（410 路径仅服务未停时有效）。
+8. **list 枚举不逐项过滤**：D20 明确列表公开；`IAuthorizer` 覆盖操作与 `resources/subscribe` URI，不覆盖 list。
+9. **审计事件范围**：当前为 pre-execution 事件（`tool_call`/`resource_read`/`prompt_get`/deny/timeout/auth_failed）；结果/错误事件后续可加。
+10. **认证错误码**：HTTP 401 + JSON-RPC `-32603` `data.reason="unauthorized"`；403 由 reason `forbidden`/`approval_denied`/`approval_timeout` 映射。
+11. **CI/质量门禁**：sanitizer、覆盖率、GCC/Clang 矩阵、perf/soak 未接入。
+12. **header-only / install / legacy 部署风险**：见 `designs/` 对应章节。
 
-## 6. 下一步（P4）
+## 5. 设计权威索引
 
-1. **M5 hooks**：`IAuthenticator`/`IAuthorizer`/`IApprovalHook`/`IAuditHook`；401/403、失败路径测试；审计异常收敛。
-2. **M6 legacy**：HTTP+SSE（`GET /sse` + `POST /messages`），默认关闭；batch 仅 legacy。
-3. **收尾**：TLS+2025 session/stream 用例、2026 `_meta.logLevel`/自动 list_changed、header-only/system-deps 评估、最终验证。
+- `designs/protocol-decisions.md`：D16/D17（executor）、D18（2026 conformance wire）、D19（2025 logging/subscriptions）、D20（security hooks）。
+- `designs/mcp-library-design.md`：§10–§18、§12 legacy、§18 安全。
+- `docs/conformance-report.md`：外部测试首轮证据与复现命令。
+- `.slim/deepwork/tugmcp-conformance-p4.md`：本轮执行状态（本地，gitignored）。
+
+## 6. 维护约定
+
+- 新增/修改公共头、wire 行为、CMake target 或 `TUGMCP_*` 开关时，同步更新 `designs/` 与本表。
+- 设计与实现冲突时，先改 `designs/` 再改代码。
+- “部分/延后”必须写清缺口；不允许只写百分比。
