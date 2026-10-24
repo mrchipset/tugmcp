@@ -13,7 +13,7 @@
 | **M2** 2026 server + client（HTTP/TLS） | 部分 | 明文 Streamable HTTP 已跑通：`POST /mcp` JSON-RPC→JSON，415/413/400(-32700/-32600/-32020/-32022)/202/200/405/404，`tugmcp::http`，HTTP loopback 端到端。未完成：**TLS**（`TUGMCP_TLS` 仍 FATAL）、SSE/`subscriptions/listen`、MRTR、resources/prompts、2025 session/replay；`admission`/并发流限制字段已标注未接线 |
 | **M3** 2025 server/session | 未开始 | 仅有 `initialize` 子集；无 session / POST/GET/DELETE / per-stream replay |
 | **M4** 2025 client/replay | 未开始 | 客户端无 session、`Last-Event-ID` replay、server→client 请求处理、cancel 路由 |
-| **M5** 宿主适配 | 未开始 | 无 `IExecutor`、auth/approval/audit hooks（见 §5 偏差 1） |
+| **M5** 宿主适配 | 部分 | `IExecutor` 已提前落地（P2a，契约见 ADR D17，默认仍为同步 dispatch）；缺 auth/approval/audit hooks、默认执行器切换（P3） |
 | **M6** legacy shim | 未开始 | `TUGMCP_ENABLE_LEGACY_SSE` 置 ON 即 `FATAL_ERROR` |
 
 ## 2. 设计章节逐节状态
@@ -48,6 +48,7 @@
 | 要素 | 状态 | 备注 |
 |---|---|---|
 | 静态库（默认产物） | 已完成 | `tugmcp::core` 为 STATIC |
+| `IExecutor` | 已完成（P2a） | 三级优先、有界队列、`noexcept` 契约、`stats`/`waitIdle`、自我排除关闭；默认仍同步（P3 翻转，D17） |
 | header-only 消费 | 未开始 | `TUGMCP_HEADER_ONLY=ON` → `FATAL_ERROR` |
 | OpenSSL 可选编译 | 已完成 | `TUGMCP_TLS=ON`（OpenSSL ≥3.0）可构建并 loopback 通过；`TLS=OFF` 时 `https://` → `unsupported_scheme`。限制：server 侧无握手错误回调、SNI 由 URL host 决定 |
 | `3rd/` vendoring | 部分 | nlohmann/json 3.12.0、doctest 2.5.3、cpp-httplib 0.63.0（单头哈希）；jsoncons 1.10.0、Valijson 1.1.3（逐文件 `MANIFEST.sha256`，177+49 文件） |
@@ -58,10 +59,10 @@
 
 ## 4. 实现与验证证据
 
-- **公共头（17）**：`core` / `version` / `error` / `message` / `transport` / `transport/stdio` / `transport/http` / `request_context` / `time_source` / `tool` / `server` / `client` / `schema` / `canonical` / `schema/{null,jsoncons,valijson}`（另有实现专用 `detail/http_httplib.hpp`）
-- **源码（14）**：`src/core/{version,error,message,codec,canonical,registry,dispatcher,client}.cpp`、`src/core/dispatcher.hpp`、`src/transport/{stdio,http_server,http_client}.cpp`、`src/schema/{jsoncons,valijson}_validator.cpp`
-- **测试**：11 个 unit 文件、4 个 integration 文件、双 TU ODR、`tests/helpers/fake_transport.hpp`
-- **ctest**：默认 `TLS=OFF` **150/150**；`TLS=ON` **151/151**（含 2 个 TLS loopback 用例）
+- **公共头（18）**：`core` / `version` / `error` / `message` / `transport` / `transport/stdio` / `transport/http` / `request_context` / `time_source` / `tool` / `server` / `client` / `executor` / `schema` / `canonical` / `schema/{null,jsoncons,valijson}`（另有实现专用 `detail/http_httplib.hpp`）
+- **源码（16）**：`src/core/{version,error,message,codec,canonical,registry,dispatcher,server,executor,client}.cpp`、`src/core/dispatcher.hpp`、`src/transport/{stdio,http_server,http_client}.cpp`、`src/schema/{jsoncons,valijson}_validator.cpp`
+- **测试**：11 个 unit 文件（含 `executor_test.cpp`）、4 个 integration 文件、双 TU ODR、`tests/helpers/fake_transport.hpp`
+- **ctest**：默认 `TLS=OFF` **168/168**；`TLS=ON` **169/169**（含 2 个 TLS loopback 用例）
 - **构建**：MSVC `/W4 /permissive- /utf-8` 无告警；configure 阶段校验单头 SHA256 + jsoncons/Valijson 逐文件清单（177+49）
 
 | commit | 内容 |
@@ -71,12 +72,14 @@
 | `efe6d1d` | `feat(client)`：`McpClient`、pending/超时、端到端 loopback、并发用例 |
 | `b43961f` | `feat(schema)`：M1.5 schema 校验、canonical JSON、`tool_schema_hash` |
 | `22f2fbb` | `feat(http)`：Streamable HTTP JSON 传输、server/client、loopback 用例 |
+| `2f359e0` | `feat(executor)`：`IExecutor`、线程池、off-thread dispatch（P2a） |
+| `9426a6d` | `fix(executor)`：冻结契约（`noexcept`/`stats`/`waitIdle`/Emergency 绕过）、自我排除关闭、ADR D17 |
 
 ## 5. 已记录偏差
 
-1. **D16（临时）**：M1 无 `IExecutor`，handler 在 transport reader 线程同步执行；`RequestContext.cancellation` 恒非空但无跨线程置位来源。M5 替换。见 `designs/protocol-decisions.md`。
+1. **D16/D17**：`IExecutor` 已落地（P2a）且契约冻结；默认 `executor == nullptr` 仍走同步 dispatch（P3 切默认线程池）。`RequestContext.cancellation` 目前仍无跨线程置位来源，`RequestId → token` 取消路由属 P2b。见 `designs/protocol-decisions.md`。
 2. **POSIX close 限制**：POSIX 下 `StdioTransport::close()` 依赖 peer EOF；Windows 已用 `CancelSynchronousIo` 中断等待。
-3. **未实现开关一律 FATAL**：`TLS` / `HEADER_ONLY` / `USE_SYSTEM_DEPS` / `ENABLE_LEGACY_SSE` / `CONFORMANCE` 置 ON 均显式失败，不静默降级；`WITH_HTTP` / `WITH_JSONCONS` / `WITH_VALIJSON` 已实现。
+3. **未实现开关一律 FATAL**：`HEADER_ONLY` / `USE_SYSTEM_DEPS` / `ENABLE_LEGACY_SSE` / `CONFORMANCE` 置 ON 均显式失败，不静默降级；`WITH_HTTP` / `WITH_JSONCONS` / `WITH_VALIJSON` / `TLS` 已实现。
 4. **协议代际未分层**：当前 dispatcher 单层 + 版本字符串，未拆 `IProtocolAdapter`。
 5. **已知技术债**（Gate 3）：一次 `call` 约 12 次解析/序列化；`McpServer` 实现寄居 `dispatcher.cpp`；ODR 仅覆盖 3/9 公共头；`FakeTransport::emitClose` 未遵守「close 后不回调」；`core.hpp` umbrella 未收录新头。
 6. **P2-B 技术债（已完成）**：`decode(const Json&)`、`ITransport::sendRaw`、`src/core/server.cpp` 拆分、ODR 覆盖全部公共头、`FakeTransport` close 后不再回调。
@@ -86,14 +89,9 @@
 
 ## 6. 下一步优先级
 
-1. **M2 前技术债（短阶段）**
-   - 新增 `Result<Message> decode(const Json&)` 与 `ITransport::sendRaw(std::string_view)`，消除 dump/parse 往返。
-   - 从 `dispatcher.cpp` 拆出 `src/core/server.cpp`。
-   - ODR 覆盖全部公共头；`core.hpp` 收录新头；修正 `FakeTransport::emitClose` 契约。
-2. **M1.5**：`schema/`（jsoncons / Valijson / null）、canonical JSON（JCS 或文档化子集）、`tool_schema_hash`、conformance harness 接线。
-3. **M2**：Streamable HTTP server/client + `TUGMCP_TLS`（OpenSSL ≥ 3.0）+ 2026 headers/`_meta`/`resultType`/MRTT/订阅。
-4. **M3 / M4**：2025 session、GET/DELETE、per-stream replay、server→client 请求。
-5. **M5 / M6**：`IExecutor` 与宿主 hooks；legacy shim。
+1. **P2b（M2 协议面）**：`resultType`/`ttlMs`/`cacheScope`、progress、resources/prompts/templates、分页、MRTR、`subscriptions/listen` + 推送、per-request SSE、`admission`/并发流限制、`echo_client`；同时收掉 Gate 2a 记录的 P2b 项（`run()` 异常收尾、执行器拒绝响应、取消路由、HTTP pending 命名空间、注入执行器集成测试）。
+2. **P3（M3/M4）**：2025 session、GET/DELETE、per-stream replay、client cancel、server→client 请求；切换默认执行器（D17 前置条件满足后）。
+3. **P4（M5/M6 + conformance）**：auth/approval/audit hooks、legacy HTTP+SSE shim（默认关闭）、conformance harness。
 
 ## 7. 维护约定
 
