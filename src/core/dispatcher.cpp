@@ -25,6 +25,7 @@ namespace {
 
 constexpr const char* kWire2026 = "2026-07-28";
 constexpr const char* kWire2025 = "2025-11-25";
+thread_local std::string g_session_id;
 constexpr const char* kMetaProtocolVersion =
     "io.modelcontextprotocol/protocolVersion";
 constexpr const char* kMetaClientCapabilities =
@@ -54,6 +55,12 @@ Json capabilities(const DispatchConfig& config,
   value["tools"] = Json{{"listChanged", true}};
   if (resources != nullptr) {
     value["resources"] = Json{{"listChanged", true}};
+    if (!is2026) {
+      value["resources"]["subscribe"] = true;
+    }
+  }
+  if (!is2026) {
+    value["logging"] = Json::object();
   }
   if (prompts != nullptr) {
     value["prompts"] = Json{{"listChanged", true}};
@@ -342,6 +349,7 @@ RequestContext makeContext(const Message& request,
   context.cancellation =
       token ? token : std::make_shared<CancellationToken>();
   context.clientCapabilities = client_capabilities;
+  context.sessionId = g_session_id;
   return context;
 }
 
@@ -657,14 +665,11 @@ Result<Json> readResource(IResourceProvider& provider,
     if (!content.blob.is_null()) {
       item["blob"] = content.blob;
     }
-    if (is2026) {
-      addCacheFields(item, content.ttlMs, content.cacheScope);
-    }
-
     Json result;
     result["contents"] = Json::array({std::move(item)});
     if (is2026) {
       result.update(completeResult(is2026));
+      addCacheFields(result, content.ttlMs, content.cacheScope);
     }
     return result;
   } catch (const std::exception& error) {
@@ -753,11 +758,13 @@ Dispatcher::Dispatcher(ToolRegistry& registry,
 std::optional<Message> Dispatcher::dispatch(
     const Message& request, const std::string& protocolVersion,
     const NotificationSink& notify,
-    std::shared_ptr<CancellationToken> token) {
+    std::shared_ptr<CancellationToken> token, std::string sessionId,
+    Json request_client_capabilities) {
   if (request.kind == MessageKind::Response) {
     return std::nullopt;
   }
 
+  g_session_id = std::move(sessionId);
   const bool notification = request.kind == MessageKind::Notification;
   const std::string version =
       protocolVersion.empty() ? std::string(kWire2025) : protocolVersion;
@@ -770,7 +777,10 @@ std::optional<Message> Dispatcher::dispatch(
 
   try {
     bool rejected = false;
-    Json client_capabilities = Json::object();
+    Json client_capabilities = std::move(request_client_capabilities);
+    if (!client_capabilities.is_object()) {
+      client_capabilities = Json::object();
+    }
     if (!isSupported(config_, version)) {
       response.error = McpError::make(
           ErrorCode::UnsupportedVersion,

@@ -532,6 +532,7 @@ private:
     std::string id;
     std::chrono::steady_clock::time_point last_seen;
     std::shared_ptr<GetStream> stream;
+    Json clientCapabilities;
     std::uint64_t next_event_id = 1;
     std::deque<ReplayEvent> replay;
   };
@@ -1338,6 +1339,7 @@ private:
       const Json& document = parsed.value();
 
       std::string session_id;
+      std::shared_ptr<Session> session_state;
       if (is_2025 && message.method != "initialize") {
         session_id = request.get_header_value("MCP-Session-Id");
         if (session_id.empty()) {
@@ -1348,11 +1350,15 @@ private:
                        message.id.toJson());
           return;
         }
-        if (!findSession(session_id)) {
+        session_state = findSession(session_id);
+        if (!session_state) {
           response.status = 404;
           return;
         }
       }
+      const Json client_capabilities =
+          session_state ? session_state->clientCapabilities
+                        : Json::object();
 
       bool emergency = false;
       if (options_.admission) {
@@ -1380,6 +1386,7 @@ private:
           MessageMetadata metadata;
           metadata.protocolVersion = version;
           metadata.sessionId = session_id;
+          metadata.clientCapabilities = client_capabilities;
           metadata.emergency = emergency;
           invokeMessage(document, metadata);
         }
@@ -1421,6 +1428,7 @@ private:
         metadata.protocolVersion = version;
         metadata.route = route;
         metadata.sessionId = session_id;
+          metadata.clientCapabilities = client_capabilities;
         metadata.emergency = emergency;
         const bool invoked = invokeMessage(document, metadata);
         erasePending(route);
@@ -1476,6 +1484,7 @@ private:
         metadata.protocolVersion = version;
         metadata.route = route;
         metadata.sessionId = session_id;
+          metadata.clientCapabilities = client_capabilities;
         metadata.emergency = emergency;
         if (!invokeMessage(document, metadata)) {
           const McpError error = McpError::make(
@@ -1506,6 +1515,7 @@ private:
       metadata.protocolVersion = version;
       metadata.route = route;
       metadata.sessionId = session_id;
+          metadata.clientCapabilities = client_capabilities;
       metadata.emergency = emergency;
       if (!invokeMessage(document, metadata)) {
         erasePending(route);
@@ -1552,6 +1562,12 @@ private:
         if (!session) {
           response.status = 429;
           return;
+        }
+        if (message.params.is_object() &&
+            message.params.contains("capabilities") &&
+            message.params.at("capabilities").is_object()) {
+          session->clientCapabilities =
+              message.params.at("capabilities");
         }
         response.set_header("MCP-Session-Id", session->id);
       }

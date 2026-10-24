@@ -213,6 +213,11 @@ Status McpServer::run() {
     } catch (...) {
     }
     clearSubscriptions();
+    {
+      std::lock_guard<std::mutex> lock(logging_mutex_);
+      log_levels_.clear();
+      resource_subscriptions_.clear();
+    }
     completeServerRequests(McpError::make(
         ErrorCode::InternalError, "transport is closed",
         Json{{"reason", "transport_closed"}}));
@@ -451,6 +456,84 @@ Status McpServer::run() {
             return;
           }
 
+          const bool is_2025_session =
+              metadata.protocolVersion.empty() ||
+              metadata.protocolVersion == "2025-11-25";
+          if (is_2025_session && message.kind == MessageKind::Request) {
+            auto send_empty = [&] {
+              Message response;
+              response.kind = MessageKind::Response;
+              response.jsonrpc = "2.0";
+              response.id = message.id;
+              response.result = Json::object();
+              send_response(metadata.route, response);
+            };
+            auto send_invalid = [&](const std::string& text) {
+              Message response;
+              response.kind = MessageKind::Response;
+              response.jsonrpc = "2.0";
+              response.id = message.id;
+              response.error =
+                  McpError::make(ErrorCode::InvalidParams, text);
+              send_response(metadata.route, response);
+            };
+
+            if (message.method == "logging/setLevel") {
+              const Json& params = message.params;
+              static const char* kLevels[] = {
+                  "debug", "info", "notice", "warning",
+                  "error", "critical", "alert", "emergency"};
+              bool valid = false;
+              std::string level;
+              if (params.is_object() && params.contains("level") &&
+                  params.at("level").is_string()) {
+                level = params.at("level").get<std::string>();
+                for (const char* candidate : kLevels) {
+                  if (level == candidate) {
+                    valid = true;
+                    break;
+                  }
+                }
+              }
+              if (!valid) {
+                send_invalid("invalid logging level");
+              } else {
+                {
+                  std::lock_guard<std::mutex> lock(logging_mutex_);
+                  log_levels_[metadata.sessionId] = level;
+                }
+                send_empty();
+              }
+              return;
+            }
+
+            if (message.method == "resources/subscribe" ||
+                message.method == "resources/unsubscribe") {
+              const Json& params = message.params;
+              if (!params.is_object() || !params.contains("uri") ||
+                  !params.at("uri").is_string()) {
+                send_invalid("resources subscription requires a string uri");
+                return;
+              }
+              const std::string uri =
+                  params.at("uri").get<std::string>();
+              std::lock_guard<std::mutex> lock(logging_mutex_);
+              auto& subscriptions =
+                  resource_subscriptions_[metadata.sessionId];
+              if (message.method == "resources/subscribe") {
+                subscriptions.insert(uri);
+              } else {
+                const auto it = subscriptions.find(uri);
+                if (it == subscriptions.end()) {
+                  send_invalid("resource is not subscribed");
+                  return;
+                }
+                subscriptions.erase(it);
+              }
+              send_empty();
+              return;
+            }
+          }
           const bool is_request = message.kind == MessageKind::Request;
           const RequestId request_id = message.id;
           const std::string token_key =
@@ -515,10 +598,13 @@ Status McpServer::run() {
           auto dispatch_and_send =
               [this, &dispatcher, record_error, notify, send_response,
                complete, message = std::move(message), route,
-               protocol_version, token]() mutable {
+               protocol_version, token,
+               session_id = std::string(metadata.sessionId),
+               client_capabilities = Json(metadata.clientCapabilities)]() mutable {
                 try {
                   auto response = dispatcher.dispatch(
-                      message, protocol_version, notify, token);
+                      message, protocol_version, notify, token, session_id,
+                      std::move(client_capabilities));
                   if (response.has_value()) {
                     send_response(route, *response);
                   }
@@ -682,6 +768,32 @@ void McpServer::notifyResourceUpdated(std::string_view uri) {
       removeSubscription(subscription.id);
     }
   }
+
+  std::vector<std::string> session_ids;
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex_);
+    for (const auto& item : resource_subscriptions_) {
+      if (item.second.count(std::string(uri)) != 0) {
+        session_ids.push_back(item.first);
+      }
+    }
+  }
+  for (const auto& session_id : session_ids) {
+    Json notification;
+    notification["jsonrpc"] = "2.0";
+    notification["method"] = "notifications/resources/updated";
+    notification["params"] = Json{{"uri", std::string(uri)}};
+    Status sent = Status::failure(McpError::make(
+        ErrorCode::InternalError, "session stream unavailable"));
+    try {
+      sent = transport_->sendToSession(session_id, notification);
+    } catch (...) {
+    }
+    if (!sent) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_error_ = sent.error;
+    }
+  }
 }
 
 void McpServer::notifyListChanged(ListKind kind) {
@@ -725,6 +837,16 @@ void McpServer::notifyListChanged(ListKind kind) {
       removeSubscription(subscription.id);
     }
   }
+}
+
+std::optional<std::string> McpServer::logLevel(
+    std::string_view sessionId) const {
+  std::lock_guard<std::mutex> lock(logging_mutex_);
+  const auto it = log_levels_.find(std::string(sessionId));
+  if (it == log_levels_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 std::size_t McpServer::activeSubscriptions() const {
@@ -850,6 +972,11 @@ Status McpServer::sendNotification(std::string_view sessionId,
 }
 
 void McpServer::handleSessionClosed(const std::string& sessionId) {
+  {
+    std::lock_guard<std::mutex> lock(logging_mutex_);
+    log_levels_.erase(sessionId);
+    resource_subscriptions_.erase(sessionId);
+  }
   std::vector<std::shared_ptr<PendingClientResponse>> pending_requests;
   {
     std::lock_guard<std::mutex> lock(server_requests_mutex_);

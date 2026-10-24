@@ -42,7 +42,9 @@ public:
   std::optional<Message> dispatch(
       const Message& request, const std::string& protocolVersion = {},
       const NotificationSink& notify = {},
-      std::shared_ptr<CancellationToken> token = nullptr);
+      std::shared_ptr<CancellationToken> token = nullptr,
+      std::string sessionId = {},
+      Json clientCapabilities = Json::object());
 
 private:
   ToolRegistry& registry_;

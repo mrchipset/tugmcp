@@ -344,6 +344,7 @@ struct TraceContext {
 struct RequestContext {
     RequestId id;
     Method method;
+    std::string sessionId;       // 2025 `MCP-Session-Id`（2026 为空；D19）
     Json inputResponses;         // MRTR retry 的客户端输入
     Json clientCapabilities;     // 2026 `_meta["io.modelcontextprotocol/clientCapabilities"]`（D18）
     std::optional<std::string> requestState;

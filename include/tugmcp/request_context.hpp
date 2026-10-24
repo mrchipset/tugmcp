@@ -39,6 +39,7 @@ struct RequestContext {
   std::optional<std::string> requestState;
   Json clientCapabilities;
   std::optional<RequestId> subscriptionId;
+  std::string sessionId;
 };
 
 } // namespace v1

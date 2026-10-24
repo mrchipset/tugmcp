@@ -20,6 +20,7 @@ struct MessageMetadata {
   std::string protocolVersion;
   std::string route;
   std::string sessionId;
+  Json clientCapabilities;
   bool emergency = false;
 };
 

@@ -518,8 +518,8 @@ TEST_CASE("protocol surface: resources lists and reads") {
   CHECK(resources.last_read_uri == "file:///a.txt");
   REQUIRE(read->result.at("contents").size() == 1);
   CHECK(read->result.at("contents").at(0).at("text") == "hello");
-  CHECK(read->result.at("contents").at(0).at("ttlMs") == 500);
-  CHECK(read->result.at("contents").at(0).at("cacheScope") == "private");
+  CHECK(read->result.at("ttlMs") == 500);
+  CHECK(read->result.at("cacheScope") == "private");
   CHECK(read->result.at("resultType") == "complete");
 
   auto legacy_read = dispatcher.dispatch(
@@ -527,6 +527,7 @@ TEST_CASE("protocol surface: resources lists and reads") {
   REQUIRE(legacy_read.has_value());
   REQUIRE_FALSE(legacy_read->error.has_value());
   CHECK_FALSE(legacy_read->result.contains("resultType"));
+  CHECK_FALSE(legacy_read->result.contains("ttlMs"));
   CHECK_FALSE(legacy_read->result.at("contents").at(0).contains("ttlMs"));
 
   auto no_provider = makeDispatcher(registry);
@@ -614,6 +615,9 @@ TEST_CASE("protocol surface: capabilities reflect configured providers") {
   REQUIRE(legacy.has_value());
   REQUIRE_FALSE(legacy->error.has_value());
   CHECK_FALSE(legacy->result.at("capabilities").contains("subscriptions"));
+  CHECK(legacy->result.at("capabilities").contains("logging"));
+  CHECK(legacy->result.at("capabilities").at("resources").at(
+            "subscribe") == true);
 
   auto bare = makeDispatcher(registry);
   auto bare_discover = bare.dispatch(request("server/discover"), kV2026);

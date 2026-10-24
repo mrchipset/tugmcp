@@ -206,6 +206,17 @@ void startReader(int port, httplib::Headers headers, Reader& reader) {
   });
 }
 
+bool waitUntil(const std::function<bool()>& predicate,
+               std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return predicate();
+}
 bool waitForText(Reader& reader, const std::string& needle,
                  std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(reader.mutex);
@@ -545,6 +556,148 @@ TEST_CASE("initialize without version header still creates a session") {
   CHECK(missing->status == 400);
   CHECK(Json::parse(missing->body).at("error").at("data").at("reason") ==
         "missing_session");
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("2025 logging capability and setLevel") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("Accept", "application/json");
+  const Json init_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 1},
+           {"method", "initialize"},
+           {"params",
+            Json{{"protocolVersion", "2025-11-25"},
+                 {"capabilities", Json::object()}}}};
+  auto initialized = client.Post("/mcp", headers, init_body.dump(),
+                                 "application/json");
+  REQUIRE(initialized);
+  REQUIRE(initialized->status == 200);
+  const Json init = Json::parse(initialized->body);
+  CHECK(init.at("result").at("capabilities").contains("logging"));
+  const std::string session_id =
+      initialized->get_header_value("MCP-Session-Id");
+  REQUIRE_FALSE(session_id.empty());
+
+  const Json set_body = Json{{"jsonrpc", "2.0"},
+                             {"id", 2},
+                             {"method", "logging/setLevel"},
+                             {"params", Json{{"level", "info"}}}};
+  auto set = client.Post("/mcp", sessionHeaders(session_id),
+                         set_body.dump(), "application/json");
+  REQUIRE(set);
+  CHECK(set->status == 200);
+  CHECK(Json::parse(set->body).at("result") == Json::object());
+
+  const Json invalid_body = Json{{"jsonrpc", "2.0"},
+                                 {"id", 3},
+                                 {"method", "logging/setLevel"},
+                                 {"params", Json{{"level", "verbose"}}}};
+  auto invalid = client.Post("/mcp", sessionHeaders(session_id),
+                             invalid_body.dump(), "application/json");
+  REQUIRE(invalid);
+  CHECK(invalid->status == 200);
+  CHECK(Json::parse(invalid->body).at("error").at("code") == -32602);
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("2025 resource subscriptions route updates and unsubscribe") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+  const std::string session_id = initializeSession(running.port());
+  const std::string uri = "test://watched-resource";
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json subscribe_body = Json{{"jsonrpc", "2.0"},
+                                   {"id", 2},
+                                   {"method", "resources/subscribe"},
+                                   {"params", Json{{"uri", uri}}}};
+  auto subscribed = client.Post("/mcp", sessionHeaders(session_id),
+                                subscribe_body.dump(), "application/json");
+  REQUIRE(subscribed);
+  CHECK(subscribed->status == 200);
+  CHECK(Json::parse(subscribed->body).at("result") == Json::object());
+
+  httplib::Headers stream_headers = sessionHeaders(session_id);
+  stream_headers.erase("Accept");
+  stream_headers.emplace("Accept", "text/event-stream");
+  Reader reader;
+  startReader(running.port(), stream_headers, reader);
+
+  REQUIRE(waitUntil(
+      [&] {
+        running.server().notifyResourceUpdated(uri);
+        return waitForText(reader, "notifications/resources/updated",
+                           std::chrono::milliseconds(20));
+      },
+      std::chrono::seconds(2)));
+
+  const Json unsubscribe_body = Json{{"jsonrpc", "2.0"},
+                                     {"id", 3},
+                                     {"method", "resources/unsubscribe"},
+                                     {"params", Json{{"uri", uri}}}};
+  auto unsubscribed = client.Post("/mcp", sessionHeaders(session_id),
+                                  unsubscribe_body.dump(),
+                                  "application/json");
+  REQUIRE(unsubscribed);
+  CHECK(unsubscribed->status == 200);
+
+  running.server().notifyResourceUpdated(uri);
+  REQUIRE(running.server()
+              .sendNotification(session_id, "notifications/message",
+                                Json{{"data", "marker"}})
+              .ok);
+  REQUIRE(waitForText(reader, "marker", std::chrono::seconds(2)));
+  const std::string snapshot = readerSnapshot(reader);
+  std::size_t count = 0;
+  std::size_t offset = 0;
+  while ((offset = snapshot.find("notifications/resources/updated",
+                                 offset)) != std::string::npos) {
+    ++count;
+    offset += 1;
+  }
+  CHECK(count == 1);
+
+  running.stop();
+  if (reader.thread.joinable()) {
+    reader.thread.join();
+  }
+}
+
+TEST_CASE("2026 logging/setLevel remains 404") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2026-07-28");
+  headers.emplace("Mcp-Method", "logging/setLevel");
+  headers.emplace("Accept", "application/json");
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 4},
+           {"method", "logging/setLevel"},
+           {"params",
+            Json{{"level", "info"},
+                 {"_meta",
+                  Json{{"io.modelcontextprotocol/protocolVersion",
+                        "2026-07-28"},
+                       {"io.modelcontextprotocol/clientCapabilities",
+                        Json::object()}}}}}};
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 404);
+  CHECK(Json::parse(response->body).at("error").at("code") == -32601);
+  CHECK(Json::parse(response->body).at("id") == 4);
 
   client.stop();
   running.stop();

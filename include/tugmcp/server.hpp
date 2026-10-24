@@ -80,6 +80,7 @@ public:
   void notifyResourceUpdated(std::string_view uri);
   void notifyListChanged(ListKind kind);
   std::size_t activeSubscriptions() const;
+  std::optional<std::string> logLevel(std::string_view sessionId) const;
 
   // Last transport/protocol error observed while running (test aid).
   std::optional<McpError> lastError() const;
@@ -120,6 +121,10 @@ private:
   std::unordered_map<std::string, std::shared_ptr<CancellationToken>>
       cancellation_tokens_;
 
+  mutable std::mutex logging_mutex_;
+  std::unordered_map<std::string, std::string> log_levels_;
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      resource_subscriptions_;
   mutable std::mutex subscriptions_mutex_;
   std::unordered_map<SubscriptionId, SubscriptionState> subscriptions_;
   std::atomic<std::uint64_t> next_subscription_id_{1};

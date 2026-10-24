@@ -92,3 +92,22 @@ if(TUGMCP_WITH_HTTP)
     target_sources(tugmcp_integration_tests PRIVATE integration/tls_loopback_test.cpp)
   endif()
 endif()
+
+if(TUGMCP_CONFORMANCE)
+  add_executable(tugmcp_conformance_server conformance/fixture_server.cpp)
+  target_link_libraries(tugmcp_conformance_server PRIVATE
+    tugmcp::core tugmcp::http)
+  target_compile_features(tugmcp_conformance_server PRIVATE cxx_std_17)
+
+  add_test(NAME conformance.external
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/conformance/run_external.py
+      --fixture-server $<TARGET_FILE:tugmcp_conformance_server>
+      --revision 2026-07-28
+      --out ${CMAKE_BINARY_DIR}/conformance/2026-07-28
+      --expected-failures ${CMAKE_CURRENT_SOURCE_DIR}/conformance/expected_failures.yaml)
+  set_tests_properties(conformance.external PROPERTIES
+    LABELS conformance
+    TIMEOUT 1800
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
