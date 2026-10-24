@@ -31,3 +31,7 @@ Thumbs.db
 
 # Deepwork local state
 .slim/deepwork/
+
+# Python bytecode
+__pycache__/
+*.pyc
