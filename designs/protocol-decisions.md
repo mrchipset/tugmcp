@@ -23,6 +23,7 @@
 | D13 | 纯 C++ 工具链：CMake ≥3.20 唯一构建系统；MSVC 2019 16.8+/GCC 9+/Clang 10+；不提供其它构建系统适配 | 已定 |
 | D14 | TLS 为构建开关（`TUGMCP_TLS`，默认 OFF；OpenSSL ≥3.0）；宏只经 `tugmcp::http` 传播 | 已定 |
 | D15 | 第三方依赖固定在 `3rd/`，手写 INTERFACE target；默认不用系统包、不用 FetchContent | 已定 |
+| D16 | M1 临时：无 `IExecutor`，handler 在 transport reader 线程同步执行；M5 替换 | 临时 |
 
 ## D1 — 2026 主、2025 回退
 
@@ -212,6 +213,18 @@
 **后果**：
 - 升级依赖需同时改 `3rd/` 与清单。
 - 构建可复现、离线可用。
+
+## D16 — M1 单线程执行（临时）
+
+**背景**：M1 的目标是最小可用的 core + stdio。设计 §16 要求 handler 在 `IExecutor` 上执行、不得阻塞 transport 线程；但线程池与跨线程取消路由属于后续里程碑。
+
+**决策**：M1 的 `McpServer` 在 transport reader 线程内同步调用 tool handler；`RequestContext.cancellation` 指向调用栈上的 `CancellationToken`（**恒非空**，但当前没有跨线程置位来源）。
+
+**后果**：
+- 慢工具会阻塞**该连接**的读侧（同一连接上的 ping/取消也会排队）；不同连接各有 reader，互不影响。
+- 客户端超时只让本次调用返回 `timeout`，不会中断服务端 handler。
+- 替换点明确：M5 引入 `IExecutor` 后，dispatcher 改为投递任务，`CancellationToken` 由 executor/取消路由置位。
+- 这是临时状态：M1 之后不得在其它路径复制「IO 线程直接执行 handler」。
 
 ## 变更流程
 

@@ -34,13 +34,29 @@ public:
   }
 
   Status send(const Json& message) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (closed_) {
-      return Status::failure(McpError::make(
-          ErrorCode::InternalError, "transport is closed"));
+    std::function<void(const Json&)> responder;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return Status::failure(McpError::make(
+            ErrorCode::InternalError, "transport is closed"));
+      }
+      sent_.push_back(message);
+      responder = auto_responder_;
     }
-    sent_.push_back(message);
+    // Invoke outside the lock so responders may safely call deliver(), which
+    // copies and invokes the onMessage callback.
+    if (responder) {
+      responder(message);
+    }
     return Status::success();
+  }
+
+  // Optional deterministic responder invoked synchronously from send().
+  // Passing nullptr clears it.
+  void setAutoResponder(std::function<void(const Json&)> responder) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto_responder_ = std::move(responder);
   }
 
   void setOnMessage(std::function<void(Json)> handler) override {
@@ -159,6 +175,7 @@ private:
   std::function<void(Json)> on_message_;
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
+  std::function<void(const Json&)> auto_responder_;
   bool started_ = false;
   bool closed_ = false;
 };

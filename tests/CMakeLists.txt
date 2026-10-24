@@ -15,7 +15,8 @@ add_executable(tugmcp_unit_tests
   unit/version_test.cpp
   unit/framing_test.cpp
   unit/registry_test.cpp
-  unit/dispatcher_test.cpp)
+  unit/dispatcher_test.cpp
+  unit/client_test.cpp)
 target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_unit_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -30,7 +31,8 @@ doctest_discover_tests(tugmcp_odr_tests TEST_PREFIX odr.
 add_executable(tugmcp_integration_tests
   main.cpp
   integration/server_test.cpp
-  integration/stdio_loopback_test.cpp)
+  integration/stdio_loopback_test.cpp
+  integration/client_loopback_test.cpp)
 target_link_libraries(tugmcp_integration_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_integration_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
