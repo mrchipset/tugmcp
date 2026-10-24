@@ -1,0 +1,32 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.ninja
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Objects / libs / binaries
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deepwork local state
+.slim/deepwork/
