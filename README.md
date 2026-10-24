@@ -18,6 +18,7 @@
 | [`designs/protocol-decisions.md`](./designs/protocol-decisions.md) | 已定协议/传输/依赖决策（ADR） |
 | [`designs/header-only.md`](./designs/header-only.md) | header-only 可行性、取舍与工量评估 |
 | [`designs/testing.md`](./designs/testing.md) | 测试分层、框架选型（doctest）、目录/target、CI 矩阵 |
+| [`docs/roadmap.md`](./docs/roadmap.md) | 里程碑完成度、设计章节落地状态与下一步优先级 |
 
 ## 目标布局
 

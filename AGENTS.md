@@ -38,6 +38,8 @@ tugmcp/
     protocol-decisions.md      # ADR/关键决策
     header-only.md             # header-only 可行性与工量
     testing.md                 # 测试分层/框架/目录与 target/CI
+  docs/
+    roadmap.md                 # 里程碑完成度与后续优先级（非设计权威）
   include/tugmcp/
     core.hpp
     server.hpp
