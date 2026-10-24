@@ -35,6 +35,10 @@ _tugmcp_verify_hash("LICENSES/jsoncons-BSL-1.0.txt"
   "97550c71a0bdfc20bf85c6c5167d7b7785f9bd3448baee048fbedf742ed52270")
 _tugmcp_verify_hash("LICENSES/valijson-BSD-2-Clause.txt"
   "61b5766db38eaa3f320c366357956d7743424bfbf90fd78f5943866ba237589e")
+_tugmcp_verify_hash("3rd/cpp-httplib/httplib.h"
+  "9021001a719768893a8a6e4051c56107690e8b8e49b41e5f903534fa19ae9afb")
+_tugmcp_verify_hash("LICENSES/cpp-httplib-MIT.txt"
+  "4b45cbe16d7b71b89ae6127e26e0d90a029198ca5e958ad8e3d0b8bbed364d8b")
 
 # Multi-file vendored libraries use per-file manifests.
 include("${CMAKE_CURRENT_LIST_DIR}/verify_manifest.cmake")

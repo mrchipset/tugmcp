@@ -17,3 +17,8 @@ add_library(tugmcp_3rd_valijson INTERFACE)
 target_include_directories(tugmcp_3rd_valijson SYSTEM INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/valijson/include)
 target_compile_features(tugmcp_3rd_valijson INTERFACE cxx_std_17)
+
+add_library(tugmcp_3rd_httplib INTERFACE)
+target_include_directories(tugmcp_3rd_httplib SYSTEM INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpp-httplib)
+target_compile_features(tugmcp_3rd_httplib INTERFACE cxx_std_17)

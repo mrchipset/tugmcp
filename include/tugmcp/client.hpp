@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -32,6 +33,10 @@ public:
   Result<Json> listTools();
   Result<Json> callTool(std::string_view name, Json arguments = Json::object());
   void close() noexcept;
+
+  // Last transport-level error observed (diagnostic; pending calls keep
+  // waiting for a response, timeout, close, or onClose).
+  std::optional<McpError> lastTransportError() const;
 
 private:
   class Impl;

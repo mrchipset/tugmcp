@@ -135,8 +135,13 @@ public:
       if (!sent) {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_.erase(request_id);
-        return Result<Json>::failure(
-            failureWithReason("failed to send request", "send_failed"));
+        // Preserve transport-provided reasons (e.g. http_status / network_error)
+        // and fall back to "send_failed" for plain transport failures.
+        McpError error = sent.error;
+        if (!error.data.is_object() || !error.data.contains("reason")) {
+          error.data = Json{{"reason", "send_failed"}};
+        }
+        return Result<Json>::failure(std::move(error));
       }
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -250,9 +255,14 @@ private:
     }
   }
 
-  void handleError(McpError) noexcept {
-    // Transport framing errors are diagnostic; pending calls keep waiting
-    // until a response, timeout, close, or onClose arrives.
+  void handleError(McpError error) noexcept {
+    // Transport errors are diagnostic for pending calls (which keep waiting for
+    // a response, timeout, close, or onClose), but they must stay visible.
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_transport_error_ = std::move(error);
+    } catch (...) {
+    }
   }
 
   void handleClose() noexcept {
@@ -274,10 +284,18 @@ private:
     }
   }
 
+public:
+  std::optional<McpError> lastTransportError() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_transport_error_;
+  }
+
+private:
   ClientOptions options_;
   std::shared_ptr<ITransport> transport_;
   std::atomic<std::int64_t> next_id_{1};
   std::atomic<std::size_t> ignored_responses_{0};
+  std::optional<McpError> last_transport_error_;
 
   std::mutex mutex_;
   std::condition_variable cv_;
@@ -313,6 +331,10 @@ void McpClient::close() noexcept {
   if (impl_) {
     impl_->close();
   }
+}
+
+std::optional<McpError> McpClient::lastTransportError() const {
+  return impl_ ? impl_->lastTransportError() : std::nullopt;
 }
 
 } // namespace v1
