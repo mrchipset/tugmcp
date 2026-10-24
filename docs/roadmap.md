@@ -70,6 +70,7 @@
 | `2468603` | `feat(stdio)`：registry、dispatcher、stdio server、echo example |
 | `efe6d1d` | `feat(client)`：`McpClient`、pending/超时、端到端 loopback、并发用例 |
 | `b43961f` | `feat(schema)`：M1.5 schema 校验、canonical JSON、`tool_schema_hash` |
+| `22f2fbb` | `feat(http)`：Streamable HTTP JSON 传输、server/client、loopback 用例 |
 
 ## 5. 已记录偏差
 
