@@ -1,6 +1,6 @@
-#include "tugmcp/transport/http.hpp"
+﻿#include "tugmcp/transport/http.hpp"
 
-#include <httplib.h>
+#include "tugmcp/detail/http_httplib.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -43,6 +43,25 @@ std::string schemeOf(const std::string& url) {
 McpError reasonError(const char* message, const char* reason) {
   return McpError::make(ErrorCode::InternalError, message,
                         Json{{"reason", reason}});
+}
+
+Result<std::shared_ptr<ITransport>> optionFailure(const char* reason,
+                                                  std::string message) {
+  return Result<std::shared_ptr<ITransport>>::failure(McpError::make(
+      ErrorCode::InvalidParams, std::move(message),
+      Json{{"reason", reason}}));
+}
+
+bool isTlsError(httplib::Error error) {
+  switch (error) {
+  case httplib::Error::SSLConnection:
+  case httplib::Error::SSLLoadingCerts:
+  case httplib::Error::SSLServerVerification:
+  case httplib::Error::SSLServerHostnameVerification:
+    return true;
+  default:
+    return false;
+  }
 }
 
 } // namespace
@@ -89,18 +108,37 @@ public:
 
     try {
 #if TUGMCP_TLS_ENABLED
-      client_ = std::make_unique<httplib::Client>(
-          base, options_.tls.certChainPath, options_.tls.privateKeyPath);
       if (scheme == "https") {
+        // cpp-httplib derives SNI and hostname verification from the URL host;
+        // this version has no separate set_server_name() API.
+        // Pass client cert/key only for mutual TLS: the 3-arg constructor loads
+        // them unconditionally, so empty paths would leave the SSL context
+        // invalid.
+        if (!options_.tls.certChainPath.empty() &&
+            !options_.tls.privateKeyPath.empty()) {
+          client_ = std::make_unique<httplib::Client>(
+              base, options_.tls.certChainPath, options_.tls.privateKeyPath);
+        } else {
+          client_ = std::make_unique<httplib::Client>(base);
+        }
         if (!options_.tls.caBundlePath.empty()) {
           client_->set_ca_cert_path(options_.tls.caBundlePath);
         }
         client_->enable_server_certificate_verification(
             options_.tls.verifyPeer);
+        client_->enable_server_hostname_verification(options_.tls.verifyPeer);
+      } else {
+        client_ = std::make_unique<httplib::Client>(base);
       }
 #else
       client_ = std::make_unique<httplib::Client>(base);
 #endif
+    } catch (const std::exception& error) {
+      client_.reset();
+      return Status::failure(
+          McpError::make(ErrorCode::InvalidParams,
+                         std::string("invalid baseUrl: ") + error.what(),
+                         Json{{"reason", "unsupported_scheme"}}));
     } catch (...) {
       client_.reset();
       return Status::failure(
@@ -111,8 +149,9 @@ public:
     if (!client_ || !client_->is_valid()) {
       client_.reset();
       return Status::failure(
-          McpError::make(ErrorCode::InvalidParams, "invalid baseUrl",
-                         Json{{"reason", "unsupported_scheme"}}));
+          McpError::make(ErrorCode::InvalidParams,
+                         "SSL client is not valid (TLS unavailable)",
+                         Json{{"reason", "tls_not_built"}}));
     }
 
     client_->set_connection_timeout(options_.requestTimeout);
@@ -179,9 +218,12 @@ public:
 
     if (!result) {
       send_lock.unlock();
-      reportError(reasonError("http request failed", "network_error"));
-      return Status::failure(
-          reasonError("http request failed", "network_error"));
+      const bool tls_failure = isTlsError(result.error());
+      const char* reason = tls_failure ? "tls_handshake_failed" : "network_error";
+      const char* message =
+          tls_failure ? "TLS handshake failed" : "http request failed";
+      reportError(reasonError(message, reason));
+      return Status::failure(reasonError(message, reason));
     }
 
     const int status = result->status;
@@ -319,6 +361,21 @@ Result<std::shared_ptr<ITransport>> makeStreamableHttpClientTransport(
     return Result<std::shared_ptr<ITransport>>::failure(
         McpError::make(ErrorCode::InvalidParams, "baseUrl must not be empty"));
   }
+
+  const std::string scheme = schemeOf(options.baseUrl);
+  const bool https = scheme == "https";
+#if !TUGMCP_TLS_ENABLED
+  if (https) {
+    return optionFailure("unsupported_scheme",
+                         "https is not supported in this build");
+  }
+#endif
+  if (https != options.tls.enabled) {
+    return optionFailure(
+        "option_invalid",
+        "tls.enabled must match the baseUrl scheme (https or http)");
+  }
+
   std::shared_ptr<ITransport> transport(new HttpClientTransport(options));
   return transport;
 }

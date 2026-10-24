@@ -292,8 +292,18 @@ Result<Message> decode(std::string_view raw) {
   if (!parsed.hasValue()) {
     return Result<Message>::failure(parsed.error());
   }
+  return decode(parsed.value());
+}
 
-  const Json& document = parsed.value();
+Result<Message> decode(const std::string& raw) {
+  return decode(std::string_view(raw));
+}
+
+Result<Message> decode(const char* raw) {
+  return decode(raw != nullptr ? std::string_view(raw) : std::string_view());
+}
+
+Result<Message> decode(const Json& document) {
   if (document.is_array()) {
     return invalidRequest("batch is not supported");
   }

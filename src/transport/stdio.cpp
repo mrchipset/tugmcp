@@ -119,6 +119,32 @@ public:
     return Status::success();
   }
 
+  Status sendRaw(std::string_view raw) {
+    if (closed_.load(std::memory_order_acquire)) {
+      return internalFailure("transport is closed");
+    }
+    if (options_.output == nullptr) {
+      return internalFailure("stdio output stream is null");
+    }
+
+    std::lock_guard<std::mutex> lock(send_mutex_);
+    if (closed_.load(std::memory_order_acquire)) {
+      return internalFailure("transport is closed");
+    }
+    if (!raw.empty() &&
+        std::fwrite(raw.data(), 1, raw.size(), options_.output) !=
+            raw.size()) {
+      return internalFailure("failed to write to stdio output");
+    }
+    if (std::fputc('\n', options_.output) == EOF) {
+      return internalFailure("failed to write to stdio output");
+    }
+    if (std::fflush(options_.output) != 0) {
+      return internalFailure("failed to flush stdio output");
+    }
+    return Status::success();
+  }
+
   void setOnMessage(std::function<void(Json)> handler) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     on_message_ = std::move(handler);
@@ -344,6 +370,10 @@ StdioTransport::~StdioTransport() = default;
 Status StdioTransport::start() { return impl_->start(); }
 
 Status StdioTransport::send(const Json& message) { return impl_->send(message); }
+
+Status StdioTransport::sendRaw(std::string_view raw) {
+  return impl_->sendRaw(raw);
+}
 
 void StdioTransport::setOnMessage(std::function<void(Json)> handler) {
   impl_->setOnMessage(std::move(handler));

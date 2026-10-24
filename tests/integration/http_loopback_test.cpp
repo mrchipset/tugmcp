@@ -429,3 +429,17 @@ TEST_CASE("admission hook option is rejected as not supported") {
         static_cast<int>(ErrorCode::InvalidParams));
   CHECK(created.error().data.at("reason") == "option_not_supported");
 }
+
+#if !TUGMCP_TLS_ENABLED
+TEST_CASE("https client transport is rejected when TLS is not built") {
+  StreamableHttpClientOptions options;
+  options.baseUrl = "https://127.0.0.1:1";
+
+  auto created = makeStreamableHttpClientTransport(options);
+  REQUIRE_FALSE(created.hasValue());
+  CHECK(static_cast<int>(created.error().code) ==
+        static_cast<int>(ErrorCode::InvalidParams));
+  REQUIRE(created.error().data.is_object());
+  CHECK(created.error().data.at("reason") == "unsupported_scheme");
+}
+#endif

@@ -15,6 +15,8 @@
 #include <tugmcp/message.hpp>
 #include <tugmcp/transport/stdio.hpp>
 
+#include "fake_transport.hpp"
+
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
@@ -426,4 +428,52 @@ TEST_CASE("stdio close returns while the reader is blocked") {
   // Closing again is safe and must not notify onClose a second time.
   harness.transport->close();
   CHECK(harness.collector.closeCount() == 1);
+}
+
+TEST_CASE("stdio sendRaw preserves bytes and fails after close") {
+  Harness harness;
+  REQUIRE(harness.start().ok);
+
+  const std::string raw =
+      R"({ "jsonrpc" : "2.0" , "id" : 1 , "method" : "ping" })";
+  REQUIRE(harness.transport->sendRaw(raw).ok);
+
+  std::string line = harness.output.readLine();
+  REQUIRE(!line.empty());
+  CHECK(line.back() == '\n');
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+    line.pop_back();
+  }
+  CHECK(line == raw);
+
+  const auto decoded = mcp::v1::decode(line);
+  REQUIRE(decoded.hasValue());
+  CHECK(decoded.value().method == "ping");
+
+  harness.input.closeWrite();
+  REQUIRE(harness.collector.waitForClose());
+  harness.transport->close();
+
+  const mcp::v1::Status after = harness.transport->sendRaw(kPingLine);
+  CHECK_FALSE(after.ok);
+}
+
+TEST_CASE("FakeTransport does not notify after close") {
+  mcp::v1::test::FakeTransport transport;
+  int closes = 0;
+  int messages = 0;
+  int errors = 0;
+  transport.setOnClose([&closes] { ++closes; });
+  transport.setOnMessage([&messages](mcp::v1::Json) { ++messages; });
+  transport.setOnError([&errors](mcp::v1::McpError) { ++errors; });
+
+  transport.close();
+  transport.emitClose();
+  transport.deliver(mcp::v1::Json::object());
+  transport.emitError(mcp::v1::McpError::make(
+      mcp::v1::ErrorCode::InternalError, "late"));
+
+  CHECK(closes == 0);
+  CHECK(messages == 0);
+  CHECK(errors == 0);
 }

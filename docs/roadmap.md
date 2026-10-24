@@ -49,7 +49,7 @@
 |---|---|---|
 | 静态库（默认产物） | 已完成 | `tugmcp::core` 为 STATIC |
 | header-only 消费 | 未开始 | `TUGMCP_HEADER_ONLY=ON` → `FATAL_ERROR` |
-| OpenSSL 可选编译 | 未开始 | `TUGMCP_TLS` → `FATAL_ERROR` |
+| OpenSSL 可选编译 | 部分（WIP） | `TUGMCP_TLS=ON` 可构建、监听与证书校验已接线；客户端 https 构造仍失败（2 个 TLS 用例红） |
 | `3rd/` vendoring | 部分 | nlohmann/json 3.12.0、doctest 2.5.3、cpp-httplib 0.63.0（单头哈希）；jsoncons 1.10.0、Valijson 1.1.3（逐文件 `MANIFEST.sha256`，177+49 文件） |
 | `TUGMCP_USE_SYSTEM_DEPS` | 未开始 | → `FATAL_ERROR` |
 | conformance 套件 | 未开始 | `TUGMCP_CONFORMANCE` → `FATAL_ERROR` |
@@ -79,9 +79,10 @@
 3. **未实现开关一律 FATAL**：`TLS` / `HEADER_ONLY` / `USE_SYSTEM_DEPS` / `ENABLE_LEGACY_SSE` / `CONFORMANCE` 置 ON 均显式失败，不静默降级；`WITH_HTTP` / `WITH_JSONCONS` / `WITH_VALIJSON` 已实现。
 4. **协议代际未分层**：当前 dispatcher 单层 + 版本字符串，未拆 `IProtocolAdapter`。
 5. **已知技术债**（Gate 3）：一次 `call` 约 12 次解析/序列化；`McpServer` 实现寄居 `dispatcher.cpp`；ODR 仅覆盖 3/9 公共头；`FakeTransport::emitClose` 未遵守「close 后不回调」；`core.hpp` umbrella 未收录新头。
-6. **P2-B 技术债顺延**（Gate 2 记录）：`decode(const Json&)`、`ITransport::sendRaw`、拆 `src/core/server.cpp`、ODR 全覆盖未做；HTTP 路径仍有 `parseStrict` + `dump` 往返。
+6. **P2-B 技术债（已完成）**：`decode(const Json&)`、`ITransport::sendRaw`、`src/core/server.cpp` 拆分、ODR 覆盖全部公共头、`FakeTransport` close 后不再回调。
 7. **HTTP stateless 约束**：pending 按 `RequestId` 关联，**并发客户端 id 必须全局唯一**（冲突 → 409）；工具在 HTTP 线程同步执行，**无执行超时**；`admission`/并发流限制字段已标注未接线。
-8. **TLS 未实现**：`TUGMCP_TLS=ON` 仍 `FATAL_ERROR`；`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`（与传输默认值一致）。
+8. **TLS（WIP，未完成）**：`TUGMCP_TLS=ON` 已接线（OpenSSL 3.0、宏/链接、SSLServer/SSLClient、工厂校验、自签 fixtures），但客户端 https 构造在 cpp-httplib 抛 `'https' scheme is not supported`，TLS=ON 的 2 个集成用例仍失败；默认 `TLS=OFF` 构建 150/150 全绿。`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`。
+9. **P2–P4 未开始**：M2 协议面（SSE/MRTR/subscriptions/resources/prompts/admission）、M3/M4（2025 session/replay）、M5/M6（executor/hooks/legacy）、conformance。
 
 ## 6. 下一步优先级
 

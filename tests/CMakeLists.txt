@@ -40,6 +40,12 @@ target_link_libraries(tugmcp_odr_tests PRIVATE tugmcp::core tugmcp::tests)
 doctest_discover_tests(tugmcp_odr_tests TEST_PREFIX odr.
   PROPERTIES LABELS unit TIMEOUT 2 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
+if(TUGMCP_TLS)
+  set(TUGMCP_INTEGRATION_TIMEOUT 10)
+else()
+  set(TUGMCP_INTEGRATION_TIMEOUT 2)
+endif()
+
 add_executable(tugmcp_integration_tests
   main.cpp
   integration/server_test.cpp
@@ -48,11 +54,20 @@ add_executable(tugmcp_integration_tests
 target_link_libraries(tugmcp_integration_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_integration_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(TUGMCP_TLS)
+  target_compile_definitions(tugmcp_integration_tests PRIVATE TUGMCP_TLS_ENABLED=1)
+else()
+  target_compile_definitions(tugmcp_integration_tests PRIVATE TUGMCP_TLS_ENABLED=0)
+endif()
 doctest_discover_tests(tugmcp_integration_tests TEST_PREFIX integration.
-  PROPERTIES LABELS integration TIMEOUT 2 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  PROPERTIES LABELS integration TIMEOUT ${TUGMCP_INTEGRATION_TIMEOUT}
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(TUGMCP_WITH_HTTP)
   target_sources(tugmcp_integration_tests PRIVATE integration/http_loopback_test.cpp)
   target_link_libraries(tugmcp_integration_tests PRIVATE
     tugmcp::http tugmcp_3rd_httplib)
+  if(TUGMCP_TLS)
+    target_sources(tugmcp_integration_tests PRIVATE integration/tls_loopback_test.cpp)
+  endif()
 endif()

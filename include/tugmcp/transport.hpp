@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <string_view>
 
 #include "error.hpp"
 #include "message.hpp"
@@ -21,6 +22,16 @@ public:
 
   // Serialize and send one message. Thread-safe. Fails once closed.
   virtual Status send(const Json& message) = 0;
+
+  // Strict JSON text convenience path. The default validates the text and
+  // forwards to send(); transports may override it to preserve raw bytes.
+  virtual Status sendRaw(std::string_view raw) {
+    auto parsed = parseStrict(raw);
+    if (!parsed.hasValue()) {
+      return Status::failure(parsed.error());
+    }
+    return send(parsed.value());
+  }
 
   // Receive callback. Set before start().
   virtual void setOnMessage(std::function<void(Json)> handler) = 0;

@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(TUGMCP_BUILD_TESTS "Build tugmcp test targets" ON)
 option(TUGMCP_BUILD_EXAMPLES "Build tugmcp examples" ON)
 option(TUGMCP_WITH_HTTP "Build the Streamable HTTP transport" ON)
-option(TUGMCP_TLS "Enable TLS support (M2, not implemented yet)" OFF)
+option(TUGMCP_TLS "Enable TLS support (OpenSSL >= 3.0)" OFF)
 option(TUGMCP_HEADER_ONLY "Consume the library header-only (not implemented yet)" OFF)
 option(TUGMCP_USE_SYSTEM_DEPS "Use system packages instead of 3rd/ (not implemented yet)" OFF)
 option(TUGMCP_VERIFY_3RD_HASHES "Verify SHA256 of vendored dependencies" ON)
@@ -18,9 +18,6 @@ option(TUGMCP_ENABLE_LEGACY_SSE "Build legacy HTTP+SSE adapter (not implemented 
 option(TUGMCP_CONFORMANCE "Run external MCP conformance suite (not implemented yet)" OFF)
 set(TUGMCP_TLS_BACKEND "openssl" CACHE STRING "TLS backend (openssl only)")
 
-if(TUGMCP_TLS)
-  message(FATAL_ERROR "TUGMCP_TLS is not implemented yet (M2)")
-endif()
 if(TUGMCP_HEADER_ONLY)
   message(FATAL_ERROR "TUGMCP_HEADER_ONLY is not implemented yet")
 endif()
@@ -53,6 +50,7 @@ add_library(tugmcp_core STATIC
   src/core/canonical.cpp
   src/core/registry.cpp
   src/core/dispatcher.cpp
+  src/core/server.cpp
   src/core/client.cpp
   src/transport/stdio.cpp)
 add_library(tugmcp::core ALIAS tugmcp_core)
@@ -105,7 +103,21 @@ if(TUGMCP_WITH_HTTP)
   target_compile_features(tugmcp_http PUBLIC cxx_std_17)
   target_link_libraries(tugmcp_http PUBLIC tugmcp::core)
   target_link_libraries(tugmcp_http PRIVATE tugmcp_3rd_httplib)
-  target_compile_definitions(tugmcp_http PRIVATE TUGMCP_TLS_ENABLED=0)
+  if(TUGMCP_TLS)
+    if(NOT TUGMCP_WITH_HTTP)
+      message(FATAL_ERROR "TUGMCP_TLS=ON requires TUGMCP_WITH_HTTP=ON")
+    endif()
+    find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
+    target_compile_definitions(tugmcp_http PRIVATE
+      TUGMCP_TLS_ENABLED=1
+      CPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(tugmcp_http PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    if(WIN32)
+      target_link_libraries(tugmcp_http PRIVATE crypt32)
+    endif()
+  else()
+    target_compile_definitions(tugmcp_http PRIVATE TUGMCP_TLS_ENABLED=0)
+  endif()
   if(WIN32)
     target_link_libraries(tugmcp_http PRIVATE ws2_32)
   endif()

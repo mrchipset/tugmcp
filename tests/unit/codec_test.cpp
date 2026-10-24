@@ -353,3 +353,38 @@ TEST_CASE("encode output is compact and contains no newline") {
   CHECK(text.find('\n') == std::string::npos);
   CHECK(text.find(' ') == std::string::npos);
 }
+
+TEST_CASE("decode(Json) matches decode(string)") {
+  const std::string request_raw =
+      R"({"jsonrpc":"2.0","id":"req-9","method":"tools/call","params":{"name":"echo"}})";
+  auto request_text = decode(request_raw);
+  auto request_json_doc = parseStrict(request_raw);
+  REQUIRE(request_text.hasValue());
+  REQUIRE(request_json_doc.hasValue());
+
+  auto request_json = decode(request_json_doc.value());
+  REQUIRE(request_json.hasValue());
+  CHECK(request_text.value().kind == request_json.value().kind);
+  CHECK(request_text.value().id == request_json.value().id);
+  CHECK(request_text.value().method == request_json.value().method);
+  CHECK(request_text.value().params == request_json.value().params);
+
+  const std::string error_raw =
+      R"({"jsonrpc":"2.0","id":12,"error":{"code":-32601,"message":"missing","data":{"x":1}}})";
+  auto error_text = decode(error_raw);
+  auto error_json_doc = parseStrict(error_raw);
+  REQUIRE(error_text.hasValue());
+  REQUIRE(error_json_doc.hasValue());
+
+  auto error_json = decode(error_json_doc.value());
+  REQUIRE(error_json.hasValue());
+  CHECK(error_text.value().kind == error_json.value().kind);
+  CHECK(error_text.value().id == error_json.value().id);
+  REQUIRE(error_text.value().error.has_value());
+  REQUIRE(error_json.value().error.has_value());
+  CHECK(static_cast<int>(error_text.value().error->code) ==
+        static_cast<int>(error_json.value().error->code));
+  CHECK(error_text.value().error->message ==
+        error_json.value().error->message);
+  CHECK(error_text.value().error->data == error_json.value().error->data);
+}

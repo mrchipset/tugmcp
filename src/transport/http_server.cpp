@@ -1,11 +1,12 @@
-#include "tugmcp/transport/http.hpp"
+﻿#include "tugmcp/transport/http.hpp"
 
-#include <httplib.h>
+#include "tugmcp/detail/http_httplib.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,20 @@ namespace {
 
 bool isJsonContentType(const std::string& value) {
   return value.find("application/json") != std::string::npos;
+}
+
+#if TUGMCP_TLS_ENABLED
+bool isReadableFile(const std::string& path) {
+  std::ifstream stream(path, std::ios::binary);
+  return stream.good();
+}
+#endif
+
+Result<std::shared_ptr<ITransport>> optionFailure(const char* reason,
+                                                  std::string message) {
+  return Result<std::shared_ptr<ITransport>>::failure(McpError::make(
+      ErrorCode::InvalidParams, std::move(message),
+      Json{{"reason", reason}}));
 }
 
 } // namespace
@@ -540,12 +555,25 @@ Result<std::shared_ptr<ITransport>> makeStreamableHttpServerTransport(
         "admission hook is not implemented",
         Json{{"reason", "option_not_supported"}}));
   }
-#if !TUGMCP_TLS_ENABLED
   if (options.tls.enabled) {
-    return Result<std::shared_ptr<ITransport>>::failure(McpError::make(
-        ErrorCode::InvalidParams, "TLS is not enabled in this build"));
-  }
+#if !TUGMCP_TLS_ENABLED
+    return optionFailure("tls_not_built",
+                         "TLS is not enabled in this build");
+#else
+    if (options.tls.certChainPath.empty() ||
+        options.tls.privateKeyPath.empty()) {
+      return optionFailure("tls_not_configured",
+                           "TLS requires a certificate chain and private key");
+    }
+    if (!isReadableFile(options.tls.certChainPath) ||
+        !isReadableFile(options.tls.privateKeyPath) ||
+        (!options.tls.clientCaFile.empty() &&
+         !isReadableFile(options.tls.clientCaFile))) {
+      return optionFailure("option_invalid",
+                           "TLS certificate or key file is not readable");
+    }
 #endif
+  }
 
   std::shared_ptr<ITransport> transport(new HttpServerTransport(options));
   return transport;

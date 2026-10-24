@@ -126,6 +126,9 @@ public:
     std::function<void()> handler;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return;
+      }
       handler = on_close_;
     }
     if (handler) {

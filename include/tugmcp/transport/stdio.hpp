@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <string_view>
 
 #include "tugmcp/transport.hpp"
 
@@ -28,6 +29,7 @@ public:
 
   Status start() override;
   Status send(const Json& message) override;
+  Status sendRaw(std::string_view raw) override;
   void setOnMessage(std::function<void(Json)> handler) override;
   void setOnError(std::function<void(McpError)> handler) override;
   void setOnClose(std::function<void()> handler) override;

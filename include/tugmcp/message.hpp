@@ -80,6 +80,14 @@ Result<Json> parseStrict(std::string_view raw);
 // Decode a single JSON-RPC message from a raw JSON text.
 Result<Message> decode(std::string_view raw);
 
+// Exact-match forwarding overloads so string literals and std::string remain
+// unambiguous alongside decode(const Json&).
+Result<Message> decode(const std::string& raw);
+Result<Message> decode(const char* raw);
+
+// Decode a JSON-RPC envelope from an already parsed strict JSON value.
+Result<Message> decode(const Json& document);
+
 // Encode a message as compact JSON-RPC. Returns InternalError when the
 // message cannot be represented as valid strict JSON.
 Result<std::string> encode(const Message& message);
