@@ -43,6 +43,11 @@ public:
     return send(message);
   }
 
+  // Best-effort abort of transport work for the given request. This is the
+  // CloseStream cancellation path: it must not block and may be a no-op for
+  // transports that cannot interrupt an in-flight send.
+  virtual void cancelPending(const RequestId&) {}
+
   // Strict JSON text convenience path. The default validates the text and
   // forwards to send(); transports may override it to preserve raw bytes.
   virtual Status sendRaw(std::string_view raw) {

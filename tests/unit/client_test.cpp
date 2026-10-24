@@ -54,6 +54,7 @@ TEST_CASE("connect sends initialize and notifications/initialized") {
   options.name = "test-client";
   options.version = "1.2.3";
   options.timeoutMs = 1000;
+  options.protocolVersion = "2025-11-25";
   McpClient client(options, transport);
 
   const Status status = client.connect();
@@ -81,6 +82,7 @@ TEST_CASE("connect fails when initialize returns an error") {
 
   ClientOptions options;
   options.timeoutMs = 1000;
+  options.protocolVersion = "2025-11-25";
   McpClient client(options, transport);
 
   const Status status = client.connect();

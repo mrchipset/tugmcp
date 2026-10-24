@@ -7,8 +7,10 @@
 #include <cctype>
 #include <cstddef>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -63,6 +65,155 @@ bool isTlsError(httplib::Error error) {
     return false;
   }
 }
+
+// Incrementally parses either a single JSON body or an SSE stream. SSE rules:
+// CRLF/LF line endings, ':' comments ignored, only `data:` fields contribute,
+// multiple data lines are joined with '\n', and a blank line dispatches the
+// accumulated event. Unknown fields (including `event:`) are ignored.
+class ResponseStreamParser {
+public:
+  explicit ResponseStreamParser(std::function<void(Json)> dispatch)
+      : dispatch_(std::move(dispatch)) {}
+
+  bool feed(const char* data, std::size_t length) {
+    if (error_.has_value()) {
+      return false;
+    }
+
+    if (!decided_) {
+      pending_.append(data, length);
+      std::size_t index = 0;
+      while (index < pending_.size() &&
+             std::isspace(static_cast<unsigned char>(pending_[index])) != 0) {
+        ++index;
+      }
+      if (index == pending_.size()) {
+        return true;
+      }
+      decided_ = true;
+      if (pending_[index] == '{') {
+        json_mode_ = true;
+        json_.append(pending_);
+        pending_.clear();
+        return true;
+      }
+      std::string initial;
+      initial.swap(pending_);
+      return feedSse(initial);
+    }
+
+    if (json_mode_) {
+      json_.append(data, length);
+      return true;
+    }
+    return feedSse(std::string(data, length));
+  }
+
+  bool finish() {
+    if (error_.has_value()) {
+      return false;
+    }
+    if (!decided_) {
+      // Nothing but whitespace was received.
+      return true;
+    }
+    if (json_mode_) {
+      return json_.empty() ? true : parseAndDispatch(json_);
+    }
+    if (!line_buffer_.empty()) {
+      std::string line;
+      line.swap(line_buffer_);
+      if (!processLine(line)) {
+        return false;
+      }
+    }
+    return dispatchEvent();
+  }
+
+  bool dispatched() const noexcept { return dispatched_; }
+
+  const std::optional<McpError>& error() const noexcept { return error_; }
+
+private:
+  bool feedSse(std::string input) {
+    line_buffer_.append(input);
+    for (;;) {
+      const std::size_t newline = line_buffer_.find('\n');
+      if (newline == std::string::npos) {
+        return true;
+      }
+      std::string line = line_buffer_.substr(0, newline);
+      line_buffer_.erase(0, newline + 1);
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      if (!processLine(line)) {
+        return false;
+      }
+    }
+  }
+
+  bool processLine(const std::string& line) {
+    if (line.empty()) {
+      return dispatchEvent();
+    }
+    if (line.front() == ':') {
+      return true;
+    }
+
+    std::string field = line;
+    std::string value;
+    const std::size_t colon = line.find(':');
+    if (colon != std::string::npos) {
+      field = line.substr(0, colon);
+      value = line.substr(colon + 1);
+      if (!value.empty() && value.front() == ' ') {
+        value.erase(value.begin());
+      }
+    }
+
+    if (field == "data") {
+      if (has_data_) {
+        data_.push_back('\n');
+      }
+      data_ += value;
+      has_data_ = true;
+    }
+    return true;
+  }
+
+  bool dispatchEvent() {
+    if (!has_data_) {
+      return true;
+    }
+    std::string payload;
+    payload.swap(data_);
+    has_data_ = false;
+    return parseAndDispatch(payload);
+  }
+
+  bool parseAndDispatch(const std::string& payload) {
+    auto parsed = parseStrict(payload);
+    if (!parsed.hasValue()) {
+      error_ = parsed.error();
+      return false;
+    }
+    dispatch_(std::move(parsed.value()));
+    dispatched_ = true;
+    return true;
+  }
+
+  std::function<void(Json)> dispatch_;
+  bool decided_ = false;
+  bool json_mode_ = false;
+  bool dispatched_ = false;
+  std::string pending_;
+  std::string json_;
+  std::string line_buffer_;
+  std::string data_;
+  bool has_data_ = false;
+  std::optional<McpError> error_;
+};
 
 } // namespace
 
@@ -191,6 +342,7 @@ public:
     }
 
     httplib::Headers headers;
+    headers.emplace("Accept", "application/json, text/event-stream");
     headers.emplace("MCP-Protocol-Version", options_.protocolVersion);
 
     if (options_.protocolVersion == "2026-07-28" &&
@@ -210,17 +362,41 @@ public:
       }
     }
 
+    Json document = message;
+    if (options_.protocolVersion == "2026-07-28" &&
+        document.contains("method") && document.at("method").is_string()) {
+      if (!document.contains("params") ||
+          !document.at("params").is_object()) {
+        document["params"] = Json::object();
+      }
+      Json& params = document["params"];
+      if (!params.contains("_meta") || !params.at("_meta").is_object()) {
+        params["_meta"] = Json::object();
+      }
+      Json& meta = params["_meta"];
+      if (!meta.contains("protocolVersion")) {
+        meta["protocolVersion"] = options_.protocolVersion;
+      }
+    }
+
     std::string body;
     try {
-      body = message.dump();
+      body = document.dump();
     } catch (...) {
       return Status::failure(
           reasonError("failed to encode request", "network_error"));
     }
 
+    ResponseStreamParser parser(
+        [this](Json parsed) { invokeMessage(std::move(parsed)); });
+
     httplib::Result result;
     try {
-      result = client->Post("/mcp", headers, body, "application/json");
+      result = client->Post(
+          "/mcp", headers, body, "application/json",
+          [&parser](const char* data, std::size_t length) {
+            return parser.feed(data, length);
+          });
     } catch (...) {
       send_lock.unlock();
       reportError(reasonError("http client threw", "network_error"));
@@ -228,18 +404,23 @@ public:
           reasonError("http client threw", "network_error"));
     }
 
+    if (parser.error().has_value()) {
+      send_lock.unlock();
+      reportError(*parser.error());
+      return Status::failure(*parser.error());
+    }
+
     if (!result) {
       send_lock.unlock();
       const bool tls_failure = isTlsError(result.error());
       const char* reason = tls_failure ? "tls_handshake_failed" : "network_error";
-      const char* message =
+      const char* error_message =
           tls_failure ? "TLS handshake failed" : "http request failed";
-      reportError(reasonError(message, reason));
-      return Status::failure(reasonError(message, reason));
+      reportError(reasonError(error_message, reason));
+      return Status::failure(reasonError(error_message, reason));
     }
 
     const int status = result->status;
-    const std::string response_body = result->body;
     send_lock.unlock();
 
     if (status < 200 || status >= 300) {
@@ -251,18 +432,39 @@ public:
           Json{{"reason", "http_status"}, {"status", status}}));
     }
 
-    if (status == 202 || response_body.empty()) {
+    if (status == 202) {
       return Status::success();
     }
 
-    auto parsed = parseStrict(response_body);
-    if (!parsed.hasValue()) {
-      reportError(parsed.error());
-      return Status::failure(parsed.error());
+    if (!parser.finish()) {
+      if (parser.error().has_value()) {
+        reportError(*parser.error());
+        return Status::failure(*parser.error());
+      }
+      return Status::failure(
+          reasonError("incomplete response stream", "network_error"));
     }
 
-    invokeMessage(std::move(parsed.value()));
+    if (!parser.dispatched()) {
+      const McpError error =
+          reasonError("incomplete response stream", "network_error");
+      reportError(error);
+      return Status::failure(error);
+    }
+
     return Status::success();
+  }
+
+  void cancelPending(const RequestId&) override {
+    // Do not take send_mutex_: the blocked sender owns it. cpp-httplib's
+    // stop() is thread-safe and aborts the in-flight socket operation.
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (client_) {
+      try {
+        client_->stop();
+      } catch (...) {
+      }
+    }
   }
 
   void setOnMessage(std::function<void(Json)> handler) override {

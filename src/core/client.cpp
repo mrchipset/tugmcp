@@ -1,5 +1,6 @@
 #include "tugmcp/client.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -10,7 +11,9 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 #include <utility>
 
 namespace mcp {
@@ -22,12 +25,30 @@ McpError failureWithReason(const char* message, const char* reason) {
                         Json{{"reason", reason}});
 }
 
+std::chrono::steady_clock::time_point currentTime(
+    const ClientOptions& options) {
+  if (options.timeSource) {
+    try {
+      return options.timeSource->now();
+    } catch (...) {
+    }
+  }
+  return std::chrono::steady_clock::now();
+}
+
 } // namespace
 
 struct PendingRequest {
+  // Guards done/result/error/callbacks. The owning call waits on cv.
+  std::mutex mutex;
+  std::condition_variable cv;
   bool done = false;
   Json result;
   std::optional<McpError> error;
+  std::shared_ptr<CancellationToken> cancellation;
+  std::optional<ProgressToken> progress_token;
+  std::function<void(const Progress&)> on_progress;
+  std::function<void(const Json&)> on_notification;
 };
 
 class McpClient::Impl {
@@ -51,7 +72,7 @@ public:
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (closed_) {
+      if (closed_.load(std::memory_order_acquire)) {
         return Status::failure(
             failureWithReason("transport is closed", "transport_closed"));
       }
@@ -68,6 +89,25 @@ public:
       return started;
     }
 
+    if (options_.protocolVersion == "2026-07-28") {
+      auto discovered = discover();
+      if (discovered.hasValue()) {
+        return Status::success();
+      }
+      const ErrorCode code = discovered.error().code;
+      const bool fallback_eligible =
+          code == ErrorCode::UnsupportedVersion ||
+          code == ErrorCode::MethodNotFound ||
+          code == ErrorCode::InvalidParams;
+      if (!options_.allow2025Fallback || !fallback_eligible) {
+        return Status::failure(discovered.error());
+      }
+    }
+
+    return initialize();
+  }
+
+  Status initialize() {
     Json params;
     params["protocolVersion"] = "2025-11-25";
     params["capabilities"] = Json::object();
@@ -96,10 +136,54 @@ public:
     return Status::success();
   }
 
-  Result<Json> call(std::string_view method, Json params) {
+  Result<Json> discover() {
+    return call("server/discover", Json::object());
+  }
+
+  Result<Json> call(std::string_view method, Json params,
+                    const CallOptions& call_options = {}) {
     if (!transport_) {
       return Result<Json>::failure(
           failureWithReason("transport is null", "transport_closed"));
+    }
+
+    // Reclaim sender threads from earlier aborted calls.
+    reapBackgroundSenders();
+
+    Json call_params = std::move(params);
+    try {
+      if (call_options.progressToken.has_value()) {
+        if (!call_params.is_object()) {
+          return Result<Json>::failure(McpError::make(
+              ErrorCode::InvalidParams,
+              "params must be an object to use progressToken"));
+        }
+        if (!call_params.contains("_meta") ||
+            !call_params.at("_meta").is_object()) {
+          call_params["_meta"] = Json::object();
+        }
+        call_params["_meta"]["progressToken"] =
+            progressTokenToJson(*call_options.progressToken);
+      }
+      if (call_options.requestState.has_value()) {
+        if (!call_params.is_object()) {
+          return Result<Json>::failure(McpError::make(
+              ErrorCode::InvalidParams,
+              "params must be an object to use requestState"));
+        }
+        call_params["requestState"] = *call_options.requestState;
+      }
+      if (!call_options.inputResponses.is_null()) {
+        if (!call_params.is_object()) {
+          return Result<Json>::failure(McpError::make(
+              ErrorCode::InvalidParams,
+              "params must be an object to use inputResponses"));
+        }
+        call_params["inputResponses"] = call_options.inputResponses;
+      }
+    } catch (...) {
+      return Result<Json>::failure(
+          failureWithReason("failed to build params", "send_failed"));
     }
 
     const std::int64_t id =
@@ -107,12 +191,30 @@ public:
     RequestId request_id;
     request_id.value = id;
 
+    if (call_options.out_id != nullptr) {
+      *call_options.out_id = request_id;
+    }
+
     auto pending = std::make_shared<PendingRequest>();
+    pending->cancellation = call_options.cancellation;
+    pending->progress_token = call_options.progressToken;
+    pending->on_progress = call_options.onProgress;
+    pending->on_notification = call_options.onNotification;
+
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (closed_) {
+      if (closed_.load(std::memory_order_acquire)) {
         return Result<Json>::failure(
             failureWithReason("transport is closed", "transport_closed"));
+      }
+      if (call_options.progressToken.has_value()) {
+        for (const auto& item : pending_) {
+          if (item.second->progress_token.has_value() &&
+              *item.second->progress_token == *call_options.progressToken) {
+            return Result<Json>::failure(McpError::make(
+                ErrorCode::InvalidParams, "progressToken already in use"));
+          }
+        }
       }
       pending_.emplace(request_id, pending);
     }
@@ -122,7 +224,7 @@ public:
       request["jsonrpc"] = "2.0";
       request["id"] = id;
       request["method"] = std::string(method);
-      request["params"] = std::move(params);
+      request["params"] = std::move(call_params);
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
       pending_.erase(request_id);
@@ -130,81 +232,214 @@ public:
           failureWithReason("failed to build request", "send_failed"));
     }
 
+    const std::shared_ptr<ITransport> transport = transport_;
+    std::thread sender;
     try {
-      Status sent = transport_->send(request);
-      if (!sent) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_.erase(request_id);
-        // Preserve transport-provided reasons (e.g. http_status / network_error)
-        // and fall back to "send_failed" for plain transport failures.
+      sender = std::thread([transport, pending,
+                            request = std::move(request)]() mutable {
+        Status sent;
+        try {
+          sent = transport->send(request);
+        } catch (...) {
+          sent = Status::failure(
+              failureWithReason("failed to send request", "send_failed"));
+        }
+        if (sent) {
+          return;
+        }
         McpError error = sent.error;
         if (!error.data.is_object() || !error.data.contains("reason")) {
           error.data = Json{{"reason", "send_failed"}};
         }
-        return Result<Json>::failure(std::move(error));
-      }
+        // The owning call removes the entry; only publish completion here.
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        if (!pending->done) {
+          pending->done = true;
+          pending->error = std::move(error);
+        }
+        pending->cv.notify_all();
+      });
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
       pending_.erase(request_id);
       return Result<Json>::failure(
-          failureWithReason("failed to send request", "send_failed"));
+          failureWithReason("failed to start sender", "send_failed"));
     }
 
-    // All timeout arithmetic goes through the injected time source. Note that
-    // condition_variable::wait_until itself still uses the real clock.
-    const auto now = options_.timeSource ? options_.timeSource->now()
-                                         : SystemTimeSource{}.now();
-    const auto deadline =
-        now + std::chrono::milliseconds(options_.timeoutMs);
+    const auto timeout = call_options.timeout.count() > 0
+                             ? call_options.timeout
+                             : std::chrono::milliseconds(options_.timeoutMs);
+    const auto deadline = currentTime(options_) + timeout;
 
-    std::unique_lock<std::mutex> lock(mutex_);
-    const bool signaled = cv_.wait_until(lock, deadline, [&pending, this] {
-      return pending->done || closed_;
-    });
+    bool timed_out = false;
+    bool cancelled = false;
 
-    if (!pending->done) {
-      pending_.erase(request_id);
-      if (!signaled || !closed_) {
-        return Result<Json>::failure(
-            failureWithReason("request timed out", "timeout"));
+    {
+      std::unique_lock<std::mutex> lock(pending->mutex);
+      for (;;) {
+        if (pending->done) {
+          break;
+        }
+        if (closed_.load(std::memory_order_acquire)) {
+          break;
+        }
+        if (call_options.cancellation &&
+            call_options.cancellation->cancelled()) {
+          cancelled = true;
+          break;
+        }
+        const auto now = currentTime(options_);
+        if (now >= deadline) {
+          timed_out = true;
+          break;
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                  now);
+        const auto slice = std::min(
+            remaining, std::chrono::milliseconds(20));
+        if (slice.count() <= 0) {
+          timed_out = true;
+          break;
+        }
+        pending->cv.wait_for(lock, slice);
       }
+
+      if (pending->done) {
+        Json result = std::move(pending->result);
+        std::optional<McpError> error = std::move(pending->error);
+        lock.unlock();
+        {
+          std::lock_guard<std::mutex> registry_lock(mutex_);
+          pending_.erase(request_id);
+        }
+        const bool aborted =
+            error.has_value() && error->data.is_object() &&
+            error->data.contains("reason") &&
+            error->data.at("reason").is_string() &&
+            (error->data.at("reason") == "cancelled" ||
+             error->data.at("reason") == "timeout");
+        if (aborted) {
+          parkSender(sender);
+        } else {
+          joinSender(sender);
+        }
+        if (error.has_value()) {
+          return Result<Json>::failure(std::move(*error));
+        }
+        return result;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> registry_lock(mutex_);
+      pending_.erase(request_id);
+    }
+
+    if (cancelled) {
+      cancelTransport(request_id);
+      parkSender(sender);
       return Result<Json>::failure(
-          failureWithReason("transport is closed", "transport_closed"));
+          failureWithReason("request cancelled", "cancelled"));
     }
 
-    Json result = std::move(pending->result);
-    std::optional<McpError> error = std::move(pending->error);
-    pending_.erase(request_id);
-    lock.unlock();
-
-    if (error.has_value()) {
-      return Result<Json>::failure(std::move(*error));
+    if (timed_out) {
+      if (pending->cancellation) {
+        pending->cancellation->cancel();
+      }
+      cancelTransport(request_id);
+      parkSender(sender);
+      return Result<Json>::failure(
+          failureWithReason("request timed out", "timeout"));
     }
-    return result;
+
+    parkSender(sender);
+    return Result<Json>::failure(
+        failureWithReason("transport is closed", "transport_closed"));
+  }
+
+  Status cancel(const RequestId& id, CancelMode mode) {
+    std::shared_ptr<PendingRequest> pending;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto it = pending_.find(id);
+      if (it == pending_.end()) {
+        return Status::failure(McpError::make(
+            ErrorCode::InternalError, "unknown request",
+            Json{{"reason", "unknown_request"}}));
+      }
+      pending = it->second;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(pending->mutex);
+      if (pending->done) {
+        return Status::success();
+      }
+      pending->done = true;
+      pending->error = failureWithReason("request cancelled", "cancelled");
+    }
+    pending->cv.notify_all();
+
+    if (pending->cancellation) {
+      pending->cancellation->cancel();
+    }
+    const bool close_stream =
+        mode == CancelMode::CloseStream ||
+        (mode == CancelMode::Auto && options_.protocolVersion == "2026-07-28");
+    if (close_stream) {
+      cancelTransport(id);
+    }
+    return Status::success();
   }
 
   void close() noexcept {
+    std::vector<std::pair<RequestId, std::shared_ptr<PendingRequest>>> entries;
     try {
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        closed_ = true;
-        for (auto& item : pending_) {
-          auto& pending = item.second;
-          if (!pending->done) {
-            pending->done = true;
-            pending->error =
-                failureWithReason("transport is closed", "transport_closed");
-          }
+        closed_.store(true, std::memory_order_release);
+        for (const auto& item : pending_) {
+          entries.emplace_back(item.first, item.second);
         }
       }
-      cv_.notify_all();
+      for (const auto& entry : entries) {
+        const auto& pending = entry.second;
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          if (pending->done) {
+            continue;
+          }
+          pending->done = true;
+          pending->error =
+              failureWithReason("transport is closed", "transport_closed");
+        }
+        pending->cv.notify_all();
+        if (pending->cancellation) {
+          pending->cancellation->cancel();
+        }
+      }
     } catch (...) {
       // Never let cleanup escape.
+    }
+    std::vector<RequestId> ids;
+    ids.reserve(entries.size());
+    for (const auto& entry : entries) {
+      ids.push_back(entry.first);
     }
 
     if (!transport_) {
       return;
     }
+
+    for (const auto& id : ids) {
+      try {
+        transport_->cancelPending(id);
+      } catch (...) {
+      }
+    }
+
+    reapBackgroundSenders();
 
     try {
       transport_->setOnMessage(nullptr);
@@ -220,38 +455,169 @@ public:
   }
 
 private:
+  static void joinSender(std::thread& sender) noexcept {
+    try {
+      if (sender.joinable()) {
+        sender.join();
+      }
+    } catch (...) {
+    }
+  }
+
+  void parkSender(std::thread& sender) noexcept {
+    try {
+      if (!sender.joinable()) {
+        return;
+      }
+      std::lock_guard<std::mutex> lock(senders_mutex_);
+      background_senders_.push_back(std::move(sender));
+    } catch (...) {
+      try {
+        if (sender.joinable()) {
+          sender.detach();
+        }
+      } catch (...) {
+      }
+    }
+  }
+
+  void reapBackgroundSenders() noexcept {
+    std::vector<std::thread> local;
+    try {
+      std::lock_guard<std::mutex> lock(senders_mutex_);
+      local.swap(background_senders_);
+    } catch (...) {
+      return;
+    }
+    for (auto& sender : local) {
+      joinSender(sender);
+    }
+  }
+
+  void cancelTransport(const RequestId& id) noexcept {
+    if (options_.protocolVersion != "2026-07-28" || !transport_) {
+      return;
+    }
+    try {
+      transport_->cancelPending(id);
+    } catch (...) {
+    }
+  }
+
   void handleMessage(Json message) noexcept {
     try {
       auto decoded = decode(message);
-      if (!decoded.hasValue() ||
-          decoded.value().kind != MessageKind::Response) {
+      if (!decoded.hasValue()) {
         ignored_responses_.fetch_add(1, std::memory_order_relaxed);
         return;
       }
 
-      Message& response = decoded.value();
+      Message& decoded_message = decoded.value();
+      if (decoded_message.kind == MessageKind::Notification) {
+        handleNotification(decoded_message, message);
+        return;
+      }
+      if (decoded_message.kind != MessageKind::Response) {
+        ignored_responses_.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+
       std::shared_ptr<PendingRequest> pending;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = pending_.find(response.id);
+        const auto it = pending_.find(decoded_message.id);
         if (it == pending_.end()) {
           ignored_responses_.fetch_add(1, std::memory_order_relaxed);
           return;
         }
         pending = it->second;
+      }
+      {
+        std::lock_guard<std::mutex> pending_lock(pending->mutex);
         if (pending->done) {
           return;
         }
         pending->done = true;
-        if (response.error.has_value()) {
-          pending->error = response.error;
+        if (decoded_message.error.has_value()) {
+          pending->error = decoded_message.error;
         } else {
-          pending->result = std::move(response.result);
+          pending->result = std::move(decoded_message.result);
         }
       }
-      cv_.notify_all();
+      pending->cv.notify_all();
     } catch (...) {
       ignored_responses_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void handleNotification(const Message& notification,
+                          const Json& raw) noexcept {
+    try {
+      if (!notification.params.is_object()) {
+        return;
+      }
+      const Json& params = notification.params;
+      if (!params.contains("progressToken")) {
+        return;
+      }
+      auto token = progressTokenFromJson(params.at("progressToken"));
+      if (!token.hasValue()) {
+        return;
+      }
+
+      std::shared_ptr<PendingRequest> pending;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& item : pending_) {
+          if (item.second->progress_token.has_value() &&
+              *item.second->progress_token == token.value()) {
+            pending = item.second;
+            break;
+          }
+        }
+      }
+      if (!pending) {
+        return;
+      }
+
+      if (notification.method == "notifications/progress") {
+        std::function<void(const Progress&)> callback;
+        {
+          std::lock_guard<std::mutex> pending_lock(pending->mutex);
+          callback = pending->on_progress;
+        }
+        if (!callback) {
+          return;
+        }
+        Progress progress;
+        progress.token = token.value();
+        progress.progress = params.value("progress", 0.0);
+        if (params.contains("total") && params.at("total").is_number()) {
+          progress.total = params.at("total").get<double>();
+        }
+        if (params.contains("message") && params.at("message").is_string()) {
+          progress.message = params.at("message").get<std::string>();
+        }
+        try {
+          callback(progress);
+        } catch (...) {
+        }
+        return;
+      }
+
+      std::function<void(const Json&)> callback;
+      {
+        std::lock_guard<std::mutex> pending_lock(pending->mutex);
+        callback = pending->on_notification;
+      }
+      if (!callback) {
+        return;
+      }
+      try {
+        callback(raw);
+      } catch (...) {
+      }
+    } catch (...) {
     }
   }
 
@@ -267,19 +633,26 @@ private:
 
   void handleClose() noexcept {
     try {
+      std::vector<std::shared_ptr<PendingRequest>> entries;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        closed_ = true;
-        for (auto& item : pending_) {
-          auto& pending = item.second;
-          if (!pending->done) {
-            pending->done = true;
-            pending->error =
-                failureWithReason("transport is closed", "transport_closed");
-          }
+        closed_.store(true, std::memory_order_release);
+        for (const auto& item : pending_) {
+          entries.push_back(item.second);
         }
       }
-      cv_.notify_all();
+      for (const auto& pending : entries) {
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          if (pending->done) {
+            continue;
+          }
+          pending->done = true;
+          pending->error =
+              failureWithReason("transport is closed", "transport_closed");
+        }
+        pending->cv.notify_all();
+      }
     } catch (...) {
     }
   }
@@ -298,9 +671,11 @@ private:
   std::optional<McpError> last_transport_error_;
 
   std::mutex mutex_;
-  std::condition_variable cv_;
-  bool closed_ = false;
+  std::atomic<bool> closed_{false};
   std::unordered_map<RequestId, std::shared_ptr<PendingRequest>> pending_;
+
+  std::mutex senders_mutex_;
+  std::vector<std::thread> background_senders_;
 };
 
 McpClient::McpClient(ClientOptions options,
@@ -312,19 +687,72 @@ McpClient::~McpClient() { close(); }
 
 Status McpClient::connect() { return impl_->connect(); }
 
-Result<Json> McpClient::call(std::string_view method, Json params) {
-  return impl_->call(method, std::move(params));
+Status McpClient::initialize() { return impl_->initialize(); }
+
+Result<Json> McpClient::discover() { return impl_->discover(); }
+
+Result<Json> McpClient::call(std::string_view method, Json params,
+                             const CallOptions& options) {
+  return impl_->call(method, std::move(params), options);
 }
 
-Result<Json> McpClient::listTools() {
-  return call("tools/list", Json::object());
+Result<Json> McpClient::listTools(std::string_view cursor) {
+  Json params = Json::object();
+  if (!cursor.empty()) {
+    params["cursor"] = std::string(cursor);
+  }
+  return call("tools/list", std::move(params));
 }
 
-Result<Json> McpClient::callTool(std::string_view name, Json arguments) {
+Result<Json> McpClient::callTool(std::string_view name, Json arguments,
+                                 const CallOptions& options) {
   Json params;
   params["name"] = std::string(name);
   params["arguments"] = std::move(arguments);
-  return call("tools/call", std::move(params));
+  return call("tools/call", std::move(params), options);
+}
+
+Result<Json> McpClient::listResources(std::string_view cursor) {
+  Json params = Json::object();
+  if (!cursor.empty()) {
+    params["cursor"] = std::string(cursor);
+  }
+  return call("resources/list", std::move(params));
+}
+
+Result<Json> McpClient::listResourceTemplates(std::string_view cursor) {
+  Json params = Json::object();
+  if (!cursor.empty()) {
+    params["cursor"] = std::string(cursor);
+  }
+  return call("resources/templates/list", std::move(params));
+}
+
+Result<Json> McpClient::readResource(std::string_view uri,
+                                     const CallOptions& options) {
+  Json params;
+  params["uri"] = std::string(uri);
+  return call("resources/read", std::move(params), options);
+}
+
+Result<Json> McpClient::listPrompts(std::string_view cursor) {
+  Json params = Json::object();
+  if (!cursor.empty()) {
+    params["cursor"] = std::string(cursor);
+  }
+  return call("prompts/list", std::move(params));
+}
+
+Result<Json> McpClient::getPrompt(std::string_view name, Json arguments,
+                                  const CallOptions& options) {
+  Json params;
+  params["name"] = std::string(name);
+  params["arguments"] = std::move(arguments);
+  return call("prompts/get", std::move(params), options);
+}
+
+Status McpClient::cancel(const RequestId& id, CancelMode mode) {
+  return impl_->cancel(id, mode);
 }
 
 void McpClient::close() noexcept {

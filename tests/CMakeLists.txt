@@ -18,7 +18,6 @@ add_executable(tugmcp_unit_tests
   unit/dispatcher_test.cpp
   unit/client_test.cpp
   unit/canonical_test.cpp
-  unit/executor_test.cpp
   unit/schema_test.cpp
   unit/protocol_surface_test.cpp)
 target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::core tugmcp::tests)
@@ -41,6 +40,16 @@ add_executable(tugmcp_odr_tests odr/main.cpp odr/tu_a.cpp odr/tu_b.cpp)
 target_link_libraries(tugmcp_odr_tests PRIVATE tugmcp::core tugmcp::tests)
 doctest_discover_tests(tugmcp_odr_tests TEST_PREFIX odr.
   PROPERTIES LABELS unit TIMEOUT 2 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# Real thread-pool tests run on the integration line with a wider timeout so a
+# loaded PR machine cannot turn them into false failures (designs/testing.md §4.3).
+add_executable(tugmcp_executor_tests
+  main.cpp
+  unit/executor_test.cpp)
+target_link_libraries(tugmcp_executor_tests PRIVATE tugmcp::core tugmcp::tests)
+doctest_discover_tests(tugmcp_executor_tests TEST_PREFIX executor.
+  PROPERTIES LABELS integration TIMEOUT 10
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(TUGMCP_TLS)
   set(TUGMCP_INTEGRATION_TIMEOUT 10)
@@ -72,7 +81,8 @@ doctest_discover_tests(tugmcp_integration_tests TEST_PREFIX integration.
 if(TUGMCP_WITH_HTTP)
   target_sources(tugmcp_integration_tests PRIVATE
     integration/http_loopback_test.cpp
-    integration/http_sse_test.cpp)
+    integration/http_sse_test.cpp
+    integration/client_2026_loopback_test.cpp)
   target_link_libraries(tugmcp_integration_tests PRIVATE
     tugmcp::http tugmcp_3rd_httplib)
   if(TUGMCP_TLS)
