@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 project(tugmcp VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -58,7 +58,10 @@ add_library(tugmcp_core STATIC
   src/core/version.cpp
   src/core/error.cpp
   src/core/message.cpp
-  src/core/codec.cpp)
+  src/core/codec.cpp
+  src/core/registry.cpp
+  src/core/dispatcher.cpp
+  src/transport/stdio.cpp)
 add_library(tugmcp::core ALIAS tugmcp_core)
 
 target_include_directories(tugmcp_core PUBLIC
