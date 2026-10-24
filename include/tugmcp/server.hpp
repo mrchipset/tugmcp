@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 #include <tugmcp/executor.hpp>
 #include <tugmcp/prompt.hpp>
@@ -63,7 +64,10 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   bool stopping_ = false;
+  std::size_t in_flight_ = 0;
   std::optional<McpError> last_error_;
+  std::unordered_map<RequestId, std::shared_ptr<CancellationToken>>
+      cancellation_tokens_;
 };
 
 } // namespace v1

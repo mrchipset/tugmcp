@@ -13,9 +13,11 @@ namespace v1 {
 
 // Transport-supplied metadata for an inbound message. An empty
 // protocolVersion means the transport did not observe an explicit version (for
-// example stdio or a legacy client).
+// example stdio or a legacy client). An empty route means the transport has a
+// single logical route (sendTo falls back to send).
 struct MessageMetadata {
   std::string protocolVersion;
+  std::string route;
 };
 
 using MessageHandlerEx = std::function<void(Json, const MessageMetadata&)>;
@@ -33,6 +35,13 @@ public:
 
   // Serialize and send one message. Thread-safe. Fails once closed.
   virtual Status send(const Json& message) = 0;
+
+  // Send a message on a transport-defined route (the route is the opaque token
+  // supplied with MessageMetadata). Single-route transports ignore the route.
+  virtual Status sendTo(std::string_view route, const Json& message) {
+    (void)route;
+    return send(message);
+  }
 
   // Strict JSON text convenience path. The default validates the text and
   // forwards to send(); transports may override it to preserve raw bytes.

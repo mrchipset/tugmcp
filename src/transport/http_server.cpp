@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -14,6 +16,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <tugmcp/error.hpp>
 #include <tugmcp/message.hpp>
@@ -24,6 +27,17 @@ namespace {
 
 bool isJsonContentType(const std::string& value) {
   return value.find("application/json") != std::string::npos;
+}
+
+bool acceptsEventStream(const httplib::Request& request) {
+  return request.get_header_value("Accept").find("text/event-stream") !=
+         std::string::npos;
+}
+
+bool hasProgressToken(const Message& message) {
+  return message.params.is_object() && message.params.contains("_meta") &&
+         message.params.at("_meta").is_object() &&
+         message.params.at("_meta").contains("progressToken");
 }
 
 #if TUGMCP_TLS_ENABLED
@@ -121,41 +135,106 @@ public:
     }
 
     Message decoded;
-    try {
-      auto result = decode(message);
-      if (!result.hasValue()) {
-        return failure(ErrorCode::InternalError, "invalid response message");
-      }
-      decoded = std::move(result.value());
-    } catch (...) {
-      return failure(ErrorCode::InternalError, "invalid response message");
+    auto decode_status = decodeOutgoing(message, decoded);
+    if (!decode_status) {
+      return decode_status;
     }
-
     if (decoded.kind != MessageKind::Response) {
       return Status::success();
     }
 
-    std::shared_ptr<Pending> pending;
+    bool completed = false;
     {
-      std::lock_guard<std::mutex> lock(pending_mutex_);
-      const auto it = pending_.find(decoded.id);
-      if (it == pending_.end()) {
-        return Status::success();
+      std::lock_guard<std::mutex> lock(routes_mutex_);
+      for (auto& item : pending_) {
+        auto& pending = item.second;
+        if (!pending->done && pending->id == decoded.id) {
+          pending->done = true;
+          pending->response = message;
+          completed = true;
+          break;
+        }
       }
-      pending = it->second;
-      if (pending->done) {
-        return Status::success();
-      }
-      pending->done = true;
-      pending->response = message;
     }
-    pending_cv_.notify_all();
+    if (completed) {
+      pending_cv_.notify_all();
+    }
     return Status::success();
+  }
+
+  Status sendTo(std::string_view route, const Json& message) {
+    if (closed_.load(std::memory_order_acquire)) {
+      return failure(ErrorCode::InternalError, "transport is closed");
+    }
+
+    Message decoded;
+    auto decode_status = decodeOutgoing(message, decoded);
+    if (!decode_status) {
+      return decode_status;
+    }
+
+    if (decoded.kind == MessageKind::Response) {
+      std::shared_ptr<SseStream> stream;
+      bool completed = false;
+      {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        const auto pending_it = pending_.find(std::string(route));
+        if (pending_it != pending_.end()) {
+          auto& pending = pending_it->second;
+          if (!pending->done) {
+            pending->done = true;
+            pending->response = message;
+          }
+          completed = true;
+        } else {
+          const auto stream_it = streams_.find(std::string(route));
+          if (stream_it != streams_.end()) {
+            stream = stream_it->second;
+          }
+        }
+      }
+      if (completed) {
+        pending_cv_.notify_all();
+        return Status::success();
+      }
+      if (stream) {
+        return enqueueStream(stream, message, true);
+      }
+      return routeNotFound();
+    }
+
+    if (decoded.kind == MessageKind::Notification) {
+      std::shared_ptr<SseStream> stream;
+      bool json_route = false;
+      {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        const auto stream_it = streams_.find(std::string(route));
+        if (stream_it != streams_.end()) {
+          stream = stream_it->second;
+        } else {
+          json_route = pending_.find(std::string(route)) != pending_.end();
+        }
+      }
+      if (stream) {
+        return enqueueStream(stream, message, false);
+      }
+      if (json_route) {
+        return Status::success();
+      }
+      return routeNotFound();
+    }
+
+    return failure(ErrorCode::InternalError, "unexpected outgoing message");
   }
 
   void setOnMessage(std::function<void(Json)> handler) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     on_message_ = std::move(handler);
+  }
+
+  void setOnMessageEx(MessageHandlerEx handler) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    on_message_ex_ = std::move(handler);
   }
 
   void setOnError(std::function<void(McpError)> handler) {
@@ -169,10 +248,14 @@ public:
   }
 
   void close() noexcept {
-    closed_.store(true, std::memory_order_release);
+    if (closed_.exchange(true, std::memory_order_acq_rel)) {
+      notifyClose();
+      return;
+    }
 
+    std::vector<std::shared_ptr<SseStream>> streams;
     {
-      std::lock_guard<std::mutex> lock(pending_mutex_);
+      std::lock_guard<std::mutex> lock(routes_mutex_);
       for (auto& item : pending_) {
         auto& pending = item.second;
         if (!pending->done) {
@@ -180,8 +263,18 @@ public:
           pending->closed = true;
         }
       }
+      streams.reserve(streams_.size());
+      for (auto& item : streams_) {
+        streams.push_back(item.second);
+      }
     }
     pending_cv_.notify_all();
+
+    for (const auto& stream : streams) {
+      std::lock_guard<std::mutex> lock(stream->mutex);
+      stream->closed = true;
+      stream->cv.notify_all();
+    }
 
     std::thread listener;
     {
@@ -204,6 +297,13 @@ public:
       listener.join();
     }
 
+    {
+      std::unique_lock<std::mutex> lock(routes_mutex_);
+      active_streams_cv_.wait_for(lock, std::chrono::seconds(5), [this] {
+        return active_streams_.load(std::memory_order_acquire) == 0;
+      });
+    }
+
     notifyClose();
   }
 
@@ -213,13 +313,44 @@ public:
 
 private:
   struct Pending {
+    RequestId id;
     bool done = false;
     bool closed = false;
     Json response;
   };
 
+  struct SseStream {
+    std::string route;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<Json> frames;
+    bool done = false;
+    bool overflow = false;
+    bool closed = false;
+    std::atomic<bool> released{false};
+  };
+
   static Status failure(ErrorCode code, std::string message) {
     return Status::failure(McpError::make(code, std::move(message)));
+  }
+
+  Status routeNotFound() const {
+    return Status::failure(McpError::make(
+        ErrorCode::InternalError, "route not found",
+        Json{{"reason", "route_not_found"}}));
+  }
+
+  static Status decodeOutgoing(const Json& message, Message& decoded) {
+    try {
+      auto result = decode(message);
+      if (!result.hasValue()) {
+        return failure(ErrorCode::InternalError, "invalid response message");
+      }
+      decoded = std::move(result.value());
+      return Status::success();
+    } catch (...) {
+      return failure(ErrorCode::InternalError, "invalid response message");
+    }
   }
 
   void registerHandlers() {
@@ -248,7 +379,138 @@ private:
     return std::chrono::steady_clock::now();
   }
 
-  void respondJson(httplib::Response& response, int status, const Json& body) {
+  std::string nextRoute() {
+    const std::uint64_t value =
+        route_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
+    return "r" + std::to_string(value);
+  }
+
+  bool tryAcquireStream() {
+    const std::size_t maximum = options_.maxConcurrentStreams;
+    if (maximum == 0) {
+      active_streams_.fetch_add(1, std::memory_order_acq_rel);
+      return true;
+    }
+    std::size_t current = active_streams_.load(std::memory_order_acquire);
+    for (;;) {
+      if (current >= maximum) {
+        return false;
+      }
+      if (active_streams_.compare_exchange_weak(
+              current, current + 1, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        return true;
+      }
+    }
+  }
+
+  void releaseStream(const std::string& route,
+                     const std::shared_ptr<SseStream>& stream) noexcept {
+    {
+      std::lock_guard<std::mutex> lock(routes_mutex_);
+      const auto it = streams_.find(route);
+      if (it != streams_.end() && it->second == stream) {
+        streams_.erase(it);
+      }
+    }
+    bool expected = false;
+    if (stream->released.compare_exchange_strong(expected, true)) {
+      active_streams_.fetch_sub(1, std::memory_order_acq_rel);
+      active_streams_cv_.notify_all();
+    }
+  }
+
+  Status enqueueStream(const std::shared_ptr<SseStream>& stream,
+                       const Json& message, bool final) {
+    bool overflowed = false;
+    {
+      std::lock_guard<std::mutex> lock(stream->mutex);
+      if (stream->closed) {
+        return failure(ErrorCode::InternalError, "stream closed");
+      }
+      if (stream->done) {
+        if (stream->overflow) {
+          return Status::failure(McpError::make(
+              ErrorCode::InternalError, "stream overflow",
+              Json{{"reason", "stream_overflow"}}));
+        }
+        return failure(ErrorCode::InternalError, "stream closed");
+      }
+      if (!final && options_.perStreamQueue != 0 &&
+          stream->frames.size() >= options_.perStreamQueue) {
+        stream->overflow = true;
+        stream->done = true;
+        stream->cv.notify_all();
+        overflowed = true;
+      } else {
+        stream->frames.push_back(message);
+        if (final) {
+          stream->done = true;
+        }
+        stream->cv.notify_all();
+      }
+    }
+
+    if (overflowed) {
+      reportError(McpError::make(
+          ErrorCode::InternalError, "stream overflow",
+          Json{{"reason", "stream_overflow"}}));
+      return failure(ErrorCode::InternalError, "stream overflow");
+    }
+    return Status::success();
+  }
+
+  bool streamProvider(const std::shared_ptr<SseStream>& stream,
+                      httplib::DataSink& sink) {
+    for (;;) {
+      Json frame;
+      bool have_frame = false;
+      {
+        std::unique_lock<std::mutex> lock(stream->mutex);
+        if (stream->frames.empty() && !stream->done && !stream->closed) {
+          stream->cv.wait_for(lock, std::chrono::milliseconds(25), [&] {
+            return stream->closed || !stream->frames.empty() || stream->done;
+          });
+        }
+        if (stream->closed) {
+          return false;
+        }
+        if (!stream->frames.empty()) {
+          frame = std::move(stream->frames.front());
+          stream->frames.pop_front();
+          have_frame = true;
+        } else if (stream->done || stream->overflow) {
+          // cpp-httplib requires sink.done() to emit the terminating chunk;
+          // returning false without it makes the peer see a read error.
+          sink.done();
+          return true;
+        }
+      }
+
+      if (!have_frame) {
+        continue;
+      }
+
+      std::string encoded;
+      try {
+        encoded = "event: message\ndata: " + frame.dump() + "\n\n";
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(stream->mutex);
+        stream->closed = true;
+        stream->cv.notify_all();
+        return false;
+      }
+      if (!sink.write(encoded.data(), encoded.size())) {
+        std::lock_guard<std::mutex> lock(stream->mutex);
+        stream->closed = true;
+        stream->cv.notify_all();
+        return false;
+      }
+    }
+  }
+
+  void respondJson(httplib::Response& response, int status,
+                   const Json& body) {
     response.status = status;
     try {
       response.set_content(body.dump(), "application/json");
@@ -292,6 +554,7 @@ private:
         handler = std::move(on_close_);
       }
       on_message_ = nullptr;
+      on_message_ex_ = nullptr;
       on_error_ = nullptr;
       on_close_ = nullptr;
     }
@@ -304,17 +567,29 @@ private:
     }
   }
 
-  bool invokeMessage(const Json& message) {
-    std::function<void(Json)> handler;
+  bool hasMessageHandler() {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    return static_cast<bool>(on_message_ex_) ||
+           static_cast<bool>(on_message_);
+  }
+
+  bool invokeMessage(const Json& message, const MessageMetadata& metadata) {
+    MessageHandlerEx extended;
+    std::function<void(Json)> simple;
     {
       std::lock_guard<std::mutex> lock(callback_mutex_);
-      handler = on_message_;
+      extended = on_message_ex_;
+      simple = on_message_;
     }
-    if (!handler) {
+    if (!extended && !simple) {
       return false;
     }
     try {
-      handler(message);
+      if (extended) {
+        extended(message, metadata);
+      } else {
+        simple(message);
+      }
       return true;
     } catch (const std::exception& error) {
       reportError(McpError::make(
@@ -326,6 +601,19 @@ private:
                                  "onMessage handler threw"));
       return false;
     }
+  }
+
+  static Json errorResponseJson(const RequestId& id, const McpError& error) {
+    Json body;
+    body["jsonrpc"] = "2.0";
+    body["id"] = id.toJson();
+    body["error"] = errorToJson(error);
+    return body;
+  }
+
+  void erasePending(const std::string& route) {
+    std::lock_guard<std::mutex> lock(routes_mutex_);
+    pending_.erase(route);
   }
 
   void handlePost(const httplib::Request& request,
@@ -401,8 +689,60 @@ private:
       }
       const Json& document = parsed.value();
 
+      if (options_.admission) {
+        RequestContext context;
+        context.id = message.id;
+        context.method = message.method;
+        AdmissionDecision decision = AdmissionDecision::Accept;
+        try {
+          decision = options_.admission->admit(context, document);
+        } catch (...) {
+          respondError(response, 500,
+                       McpError::make(ErrorCode::InternalError,
+                                      "admission hook failed"));
+          return;
+        }
+        if (decision == AdmissionDecision::Reject) {
+          response.status = 429;
+          return;
+        }
+      }
+
+      if (!hasMessageHandler()) {
+        if (message.kind == MessageKind::Notification) {
+          response.status = 202;
+          response.set_content("", "application/json");
+          return;
+        }
+        respondError(response, 500,
+                     McpError::make(ErrorCode::InternalError,
+                                    "message handler unavailable"),
+                     message.id.toJson());
+        return;
+      }
+
       if (message.kind == MessageKind::Notification) {
-        if (!invokeMessage(document)) {
+        const std::string route = nextRoute();
+        {
+          std::lock_guard<std::mutex> lock(routes_mutex_);
+          if (closed_.load(std::memory_order_acquire)) {
+            respondError(response, 503,
+                         McpError::make(ErrorCode::InternalError,
+                                        "transport is closed"),
+                         message.id.toJson());
+            return;
+          }
+          auto pending = std::make_shared<Pending>();
+          pending->id = message.id;
+          pending_[route] = std::move(pending);
+        }
+
+        MessageMetadata metadata;
+        metadata.protocolVersion = version;
+        metadata.route = route;
+        const bool invoked = invokeMessage(document, metadata);
+        erasePending(route);
+        if (!invoked) {
           respondError(response, 500,
                        McpError::make(ErrorCode::InternalError,
                                       "message handler unavailable"));
@@ -413,38 +753,75 @@ private:
         return;
       }
 
-      auto pending = std::make_shared<Pending>();
-      bool closed_now = false;
-      bool inserted = false;
-      {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        closed_now = closed_.load(std::memory_order_acquire);
-        if (!closed_now) {
-          inserted = pending_.emplace(message.id, pending).second;
+      const bool wants_sse =
+          acceptsEventStream(request) &&
+          (hasProgressToken(message) ||
+           message.method == "subscriptions/listen");
+
+      if (wants_sse) {
+        auto stream = std::make_shared<SseStream>();
+        stream->route = nextRoute();
+        const std::string route = stream->route;
+
+        if (!tryAcquireStream()) {
+          response.status = 429;
+          return;
         }
-      }
-      if (closed_now) {
-        respondError(response, 503,
-                     McpError::make(ErrorCode::InternalError,
-                                    "transport is closed"),
-                     message.id.toJson());
+
+        try {
+          {
+            std::lock_guard<std::mutex> lock(routes_mutex_);
+            streams_[route] = stream;
+          }
+
+          response.set_header("Cache-Control", "no-cache");
+          response.status = 200;
+          response.set_chunked_content_provider(
+              "text/event-stream",
+              [this, stream](std::size_t, httplib::DataSink& sink) {
+                return streamProvider(stream, sink);
+              },
+              [this, route, stream](bool) {
+                releaseStream(route, stream);
+              });
+        } catch (...) {
+          releaseStream(route, stream);
+          throw;
+        }
+
+        MessageMetadata metadata;
+        metadata.protocolVersion = version;
+        metadata.route = route;
+        if (!invokeMessage(document, metadata)) {
+          const McpError error = McpError::make(
+              ErrorCode::InternalError, "message handler unavailable");
+          enqueueStream(stream, errorResponseJson(message.id, error), true);
+        }
         return;
       }
-      if (!inserted) {
-        respondError(response, 409,
-                     McpError::make(ErrorCode::InvalidRequest,
-                                    "duplicate in-flight request id"),
-                     message.id.toJson());
-        return;
+
+      const std::string route = nextRoute();
+      auto pending = std::make_shared<Pending>();
+      pending->id = message.id;
+      {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        if (closed_.load(std::memory_order_acquire)) {
+          respondError(response, 503,
+                       McpError::make(ErrorCode::InternalError,
+                                      "transport is closed"),
+                       message.id.toJson());
+          return;
+        }
+        pending_[route] = pending;
       }
 
       const auto deadline = now() + options_.requestTimeout;
 
-      if (!invokeMessage(document)) {
-        {
-          std::lock_guard<std::mutex> lock(pending_mutex_);
-          pending_.erase(message.id);
-        }
+      MessageMetadata metadata;
+      metadata.protocolVersion = version;
+      metadata.route = route;
+      if (!invokeMessage(document, metadata)) {
+        erasePending(route);
         respondError(response, 500,
                      McpError::make(ErrorCode::InternalError,
                                     "message handler unavailable"),
@@ -452,12 +829,12 @@ private:
         return;
       }
 
-      std::unique_lock<std::mutex> lock(pending_mutex_);
+      std::unique_lock<std::mutex> lock(routes_mutex_);
       const bool completed = pending_cv_.wait_until(
           lock, deadline, [&pending] { return pending->done; });
 
       if (!completed) {
-        pending_.erase(message.id);
+        pending_.erase(route);
         lock.unlock();
         respondError(response, 504,
                      McpError::make(ErrorCode::InternalError,
@@ -466,7 +843,7 @@ private:
         return;
       }
       if (pending->closed) {
-        pending_.erase(message.id);
+        pending_.erase(route);
         lock.unlock();
         respondError(response, 503,
                      McpError::make(ErrorCode::InternalError,
@@ -476,7 +853,7 @@ private:
       }
 
       Json body = pending->response;
-      pending_.erase(message.id);
+      pending_.erase(route);
       lock.unlock();
 
       respondJson(response, 200, body);
@@ -499,12 +876,17 @@ private:
 
   std::mutex callback_mutex_;
   std::function<void(Json)> on_message_;
+  MessageHandlerEx on_message_ex_;
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
 
-  std::mutex pending_mutex_;
+  std::mutex routes_mutex_;
   std::condition_variable pending_cv_;
-  std::unordered_map<RequestId, std::shared_ptr<Pending>> pending_;
+  std::unordered_map<std::string, std::shared_ptr<Pending>> pending_;
+  std::unordered_map<std::string, std::shared_ptr<SseStream>> streams_;
+  std::atomic<std::size_t> active_streams_{0};
+  std::condition_variable active_streams_cv_;
+  std::atomic<std::uint64_t> route_counter_{0};
 };
 
 HttpServerTransport::HttpServerTransport(StreamableHttpServerOptions options)
@@ -518,9 +900,18 @@ Status HttpServerTransport::send(const Json& message) {
   return impl_->send(message);
 }
 
+Status HttpServerTransport::sendTo(std::string_view route,
+                                   const Json& message) {
+  return impl_->sendTo(route, message);
+}
+
 void HttpServerTransport::setOnMessage(
     std::function<void(Json)> handler) {
   impl_->setOnMessage(std::move(handler));
+}
+
+void HttpServerTransport::setOnMessageEx(MessageHandlerEx handler) {
+  impl_->setOnMessageEx(std::move(handler));
 }
 
 void HttpServerTransport::setOnError(
@@ -546,12 +937,6 @@ Result<std::shared_ptr<ITransport>> makeStreamableHttpServerTransport(
     return Result<std::shared_ptr<ITransport>>::failure(
         McpError::make(ErrorCode::InvalidParams,
                        "maxBodyBytes must be greater than zero"));
-  }
-  if (options.admission) {
-    return Result<std::shared_ptr<ITransport>>::failure(McpError::make(
-        ErrorCode::InvalidParams,
-        "admission hook is not implemented",
-        Json{{"reason", "option_not_supported"}}));
   }
   if (options.tls.enabled) {
 #if !TUGMCP_TLS_ENABLED

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <tugmcp/request_context.hpp>
 #include <tugmcp/time_source.hpp>
@@ -34,19 +35,18 @@ public:
                                   const Json& request) = 0;
 };
 
-// Stateless M2 HTTP server. In-flight requests are associated by RequestId only;
-// concurrent clients must therefore keep ids globally unique. This is an M2
-// limitation; P3 will scope pending requests per executor/connection.
+// Streamable HTTP server. Each POST is routed independently; concurrent
+// clients may reuse JSON-RPC ids safely.
 struct StreamableHttpServerOptions {
   std::string bind = "127.0.0.1";
   int port = 0;
   std::size_t maxBodyBytes = 1u << 20;
-  std::size_t maxConcurrentStreams = 8; // not wired yet (M2 remaining)
-  std::size_t perStreamQueue = 256;     // not wired yet (M2 remaining)
-  bool enable2025Session = true;        // not wired yet (M2 remaining)
-  std::shared_ptr<IAdmissionHook> admission; // not wired yet (M2 remaining)
-  std::string emergencyPath = "/emergency";  // not wired yet (M2 remaining)
-  bool dedicatedEmergencyListener = false;   // not wired yet (M2 remaining)
+  std::size_t maxConcurrentStreams = 8; // 0 = unbounded
+  std::size_t perStreamQueue = 256;     // 0 = unbounded
+  bool enable2025Session = true;        // not wired yet (M3)
+  std::shared_ptr<IAdmissionHook> admission;
+  std::string emergencyPath = "/emergency";  // not wired yet (P3)
+  bool dedicatedEmergencyListener = false;   // not wired yet (P3)
   TlsOptions tls;
   std::shared_ptr<ITimeSource> timeSource;
   // Before P3/IExecutor, tool execution runs synchronously on the HTTP thread,
@@ -61,7 +61,9 @@ public:
 
   Status start() override;
   Status send(const Json& message) override;
+  Status sendTo(std::string_view route, const Json& message) override;
   void setOnMessage(std::function<void(Json)> handler) override;
+  void setOnMessageEx(MessageHandlerEx handler) override;
   void setOnError(std::function<void(McpError)> handler) override;
   void setOnClose(std::function<void()> handler) override;
   void close() override;

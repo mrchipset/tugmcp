@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,7 +39,8 @@ public:
   // the 2025-11-25 era.
   std::optional<Message> dispatch(
       const Message& request, const std::string& protocolVersion = {},
-      const NotificationSink& notify = {});
+      const NotificationSink& notify = {},
+      std::shared_ptr<CancellationToken> token = nullptr);
 
 private:
   ToolRegistry& registry_;

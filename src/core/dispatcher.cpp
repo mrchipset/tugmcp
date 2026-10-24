@@ -251,11 +251,13 @@ private:
   const NotificationSink* notify_;
 };
 
-RequestContext makeContext(const Message& request) {
+RequestContext makeContext(const Message& request,
+                           const std::shared_ptr<CancellationToken>& token) {
   RequestContext context;
   context.id = request.id;
   context.method = request.method;
-  context.cancellation = std::make_shared<CancellationToken>();
+  context.cancellation =
+      token ? token : std::make_shared<CancellationToken>();
   return context;
 }
 
@@ -309,7 +311,8 @@ Result<Json> toolResultToJson(const ToolResult& result, bool is2026) {
 }
 
 Result<Json> callTool(ToolRegistry& registry, const Message& request,
-                      bool is2026, const NotificationSink& notify) {
+                      bool is2026, const NotificationSink& notify,
+                      const std::shared_ptr<CancellationToken>& token) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "tools/call params must be an object"));
@@ -342,9 +345,9 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
     return Result<Json>::failure(input_status.error);
   }
 
-  auto token = readProgressToken(params);
-  if (!token.hasValue()) {
-    return Result<Json>::failure(token.error());
+  auto progress_token = readProgressToken(params);
+  if (!progress_token.hasValue()) {
+    return Result<Json>::failure(progress_token.error());
   }
 
   auto mrtr = readMrtr(params);
@@ -352,15 +355,15 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request);
+  RequestContext context = makeContext(request, token);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
   NullProgressSink null_sink;
   IProgressSink* sink = &null_sink;
-  BoundProgressSink bound_sink(token.value().value_or(ProgressToken{}),
-                               &notify);
-  if (token.value().has_value()) {
+  BoundProgressSink bound_sink(
+      progress_token.value().value_or(ProgressToken{}), &notify);
+  if (progress_token.value().has_value()) {
     sink = &bound_sink;
   }
 
@@ -478,8 +481,9 @@ Result<Json> pageToJson(const Page<T>& page, bool is2026,
 
 Result<Json> listResources(IResourceProvider& provider,
                            const Message& request, const Json& cursor,
-                           bool is2026) {
-  RequestContext context = makeContext(request);
+                           bool is2026,
+                           const std::shared_ptr<CancellationToken>& token) {
+  RequestContext context = makeContext(request, token);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -492,8 +496,9 @@ Result<Json> listResources(IResourceProvider& provider,
 
 Result<Json> listResourceTemplates(IResourceProvider& provider,
                                    const Message& request, const Json& cursor,
-                                   bool is2026) {
-  RequestContext context = makeContext(request);
+                                   bool is2026,
+                                   const std::shared_ptr<CancellationToken>& token) {
+  RequestContext context = makeContext(request, token);
   auto page = provider.templates(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -506,8 +511,9 @@ Result<Json> listResourceTemplates(IResourceProvider& provider,
 
 Result<Json> listPrompts(IPromptProvider& provider,
                          const Message& request, const Json& cursor,
-                         bool is2026) {
-  RequestContext context = makeContext(request);
+                         bool is2026,
+                         const std::shared_ptr<CancellationToken>& token) {
+  RequestContext context = makeContext(request, token);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -519,7 +525,8 @@ Result<Json> listPrompts(IPromptProvider& provider,
 }
 
 Result<Json> readResource(IResourceProvider& provider,
-                          const Message& request, bool is2026) {
+                          const Message& request, bool is2026,
+                          const std::shared_ptr<CancellationToken>& token) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "resources/read params must be an object"));
@@ -537,7 +544,7 @@ Result<Json> readResource(IResourceProvider& provider,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request);
+  RequestContext context = makeContext(request, token);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -583,7 +590,8 @@ Result<Json> readResource(IResourceProvider& provider,
 }
 
 Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
-                       bool is2026) {
+                       bool is2026,
+                       const std::shared_ptr<CancellationToken>& token) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "prompts/get params must be an object"));
@@ -609,7 +617,7 @@ Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request);
+  RequestContext context = makeContext(request, token);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -655,7 +663,8 @@ Dispatcher::Dispatcher(ToolRegistry& registry,
 
 std::optional<Message> Dispatcher::dispatch(
     const Message& request, const std::string& protocolVersion,
-    const NotificationSink& notify) {
+    const NotificationSink& notify,
+    std::shared_ptr<CancellationToken> token) {
   if (request.kind == MessageKind::Response) {
     return std::nullopt;
   }
@@ -756,7 +765,7 @@ std::optional<Message> Dispatcher::dispatch(
         }
       }
     } else if (request.method == "tools/call") {
-      auto called = callTool(registry_, request, is2026, notify);
+      auto called = callTool(registry_, request, is2026, notify, token);
       if (!called.hasValue()) {
         response.error = called.error();
       } else {
@@ -777,7 +786,7 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result =
-                listResources(*resources_, request, cursor.value(), is2026);
+                listResources(*resources_, request, cursor.value(), is2026, token);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -795,7 +804,7 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result = listResourceTemplates(*resources_, request,
-                                                cursor.value(), is2026);
+                                                cursor.value(), is2026, token);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -808,7 +817,7 @@ std::optional<Message> Dispatcher::dispatch(
           response.error = McpError::make(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
-          auto result = readResource(*resources_, request, is2026);
+          auto result = readResource(*resources_, request, is2026, token);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {
@@ -825,7 +834,7 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result =
-                listPrompts(*prompts_, request, cursor.value(), is2026);
+                listPrompts(*prompts_, request, cursor.value(), is2026, token);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -838,7 +847,7 @@ std::optional<Message> Dispatcher::dispatch(
           response.error = McpError::make(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
-          auto result = getPrompt(*prompts_, request, is2026);
+          auto result = getPrompt(*prompts_, request, is2026, token);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {

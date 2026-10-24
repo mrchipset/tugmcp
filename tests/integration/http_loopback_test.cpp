@@ -279,53 +279,61 @@ public:
 
 } // namespace
 
-TEST_CASE("duplicate in-flight request id returns 409") {
+TEST_CASE("concurrent requests may reuse a JSON-RPC id across routes") {
   StartedServer started = startServer(StreamableHttpServerOptions{});
   ITransport* transport = started.transport.get();
 
-  std::promise<void> first_entered;
-  auto first_entered_future = first_entered.get_future();
-  std::promise<void> release_first;
-  auto release_first_future = release_first.get_future();
+  std::promise<void> both_entered;
+  auto both_entered_future = both_entered.get_future();
   std::atomic<int> invocations{0};
 
-  transport->setOnMessage([&, transport](Json message) {
-    const int invocation = invocations.fetch_add(1) + 1;
-    if (invocation == 1) {
-      first_entered.set_value();
-      release_first_future.wait();
-    }
-    Json response;
-    response["jsonrpc"] = "2.0";
-    response["id"] = message.at("id");
-    response["result"] = Json::object();
-    transport->send(response);
-  });
+  transport->setOnMessageEx(
+      [&, transport](Json message, const mcp::v1::MessageMetadata& metadata) {
+        if (invocations.fetch_add(1) + 1 == 2) {
+          both_entered.set_value();
+        }
+        both_entered_future.wait();
 
-  const std::string body =
-      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{}})";
+        Json response;
+        response["jsonrpc"] = "2.0";
+        response["id"] = message.at("id");
+        response["result"] = Json{{"echo", message.at("params").at("tag")}};
+        transport->sendTo(metadata.route, response);
+      });
 
-  int first_status = 0;
-  int second_status = 0;
-  auto post = [&started, &body](int& status) {
+  std::string first_body =
+      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"first"}})";
+  std::string second_body =
+      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"second"}})";
+
+  struct PostResult {
+    int status = -1;
+    std::string body;
+  };
+  auto post = [&started](const std::string& body) {
     httplib::Client client(baseUrlFor(started.port));
     auto response = client.Post("/mcp", body, "application/json");
-    status = response ? response->status : -1;
+    PostResult result;
+    if (response) {
+      result.status = response->status;
+      result.body = response->body;
+    }
     client.stop();
+    return result;
   };
 
-  std::thread first([&] { post(first_status); });
-  first_entered_future.wait();
+  PostResult first;
+  PostResult second;
+  std::thread first_thread([&] { first = post(first_body); });
+  std::thread second_thread([&] { second = post(second_body); });
+  first_thread.join();
+  second_thread.join();
 
-  std::thread second([&] { post(second_status); });
-  second.join();
-
-  release_first.set_value();
-  first.join();
-
-  CHECK(invocations.load() == 1);
-  CHECK(((first_status == 200 && second_status == 409) ||
-         (first_status == 409 && second_status == 200)));
+  REQUIRE(first.status == 200);
+  REQUIRE(second.status == 200);
+  CHECK(Json::parse(first.body).at("result").at("echo") == "first");
+  CHECK(Json::parse(second.body).at("result").at("echo") == "second");
+  CHECK(invocations.load() == 2);
 
   started.transport->close();
 }
@@ -421,15 +429,13 @@ TEST_CASE("client protocol version controls Mcp-Method header") {
   capture_thread.join();
 }
 
-TEST_CASE("admission hook option is rejected as not supported") {
+TEST_CASE("admission hook option is accepted") {
   StreamableHttpServerOptions options;
   options.admission = std::make_shared<DummyAdmission>();
 
   auto created = makeStreamableHttpServerTransport(options);
-  REQUIRE_FALSE(created.hasValue());
-  CHECK(static_cast<int>(created.error().code) ==
-        static_cast<int>(ErrorCode::InvalidParams));
-  CHECK(created.error().data.at("reason") == "option_not_supported");
+  REQUIRE(created.hasValue());
+  created.value()->close();
 }
 
 #if !TUGMCP_TLS_ENABLED

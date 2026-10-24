@@ -70,7 +70,9 @@ doctest_discover_tests(tugmcp_integration_tests TEST_PREFIX integration.
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(TUGMCP_WITH_HTTP)
-  target_sources(tugmcp_integration_tests PRIVATE integration/http_loopback_test.cpp)
+  target_sources(tugmcp_integration_tests PRIVATE
+    integration/http_loopback_test.cpp
+    integration/http_sse_test.cpp)
   target_link_libraries(tugmcp_integration_tests PRIVATE
     tugmcp::http tugmcp_3rd_httplib)
   if(TUGMCP_TLS)
