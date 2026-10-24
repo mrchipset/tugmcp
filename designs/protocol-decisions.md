@@ -240,7 +240,7 @@
   - `post` 捕获分配失败并返回 `RejectedQueueFull`；worker 捕获任务异常，异常不穿线程边界。
   - 在自身任务中销毁执行器（释放最后一个 owner）**不受支持**；在自身任务中调用 `stop()` 受支持。
 - `ServerOptions::executor` 在 **P2b 期间保持默认 `nullptr`**（同步 dispatch，保持既有测试确定性），提供 `makeThreadPoolExecutor` 供宿主/示例显式注入。
-- **P3 切换默认值**为内部线程池；切换的前置条件：请求级取消路由、HTTP pending 不再仅按 `RequestId` 全局关联、执行器拒绝路径产生 JSON-RPC 错误响应。
+- **P3 已切换默认值**为内部线程池（4 workers / 1024 队列）；`ServerOptions::useInlineExecutor = true` 可显式退回 transport 线程同步执行（测试/单线程宿主）。切换前置条件（取消路由、route 级 pending、拒绝响应）已满足。
 
 **后果**：
 - 下游（SSE/订阅/MRTR）可按上述语义设计；不得新增会抛异常的 `IExecutor` 实现。

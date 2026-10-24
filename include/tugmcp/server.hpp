@@ -39,10 +39,12 @@ struct ServerOptions {
   SchemaValidatorPtr schemaValidator;
   bool allowUnvalidatedTools = false;
 
-  // Production hosts should inject an executor. A null executor keeps the
-  // legacy synchronous dispatch path for compatibility (handlers then run on
-  // the transport thread).
+  // D17: a null executor means the server creates an internal thread pool
+  // (4 workers, 1024 queued tasks) and drains it on run() exit. Inject your own
+  // executor to share capacity with the host. Set useInlineExecutor to keep the
+  // legacy synchronous dispatch on the transport thread.
   std::shared_ptr<IExecutor> executor;
+  bool useInlineExecutor = false;
 };
 
 class McpServer {

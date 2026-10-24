@@ -525,11 +525,14 @@ TEST_CASE("same JSON-RPC id on concurrent connections is isolated by route") {
   running.stop();
 }
 
-TEST_CASE("perStreamQueue overflow terminates without a final response") {
+TEST_CASE("perStreamQueue overflow ends with a stream_overflow error frame") {
   StreamableHttpServerOptions http_options;
   http_options.perStreamQueue = 1;
   ServerOptions core_options;
   core_options.allowUnvalidatedTools = true;
+  // The overflow path is deterministic only when the handler enqueues all
+  // progress frames before the SSE provider starts draining.
+  core_options.useInlineExecutor = true;
   RunningServer running(http_options, core_options);
   addTool(running.server(), "flood",
           [](const Json&, RequestContext&, IProgressSink& progress) {

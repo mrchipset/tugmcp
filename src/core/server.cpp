@@ -1,4 +1,4 @@
-#include "tugmcp/server.hpp"
+﻿#include "tugmcp/server.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -17,6 +17,11 @@
 namespace mcp {
 namespace v1 {
 namespace {
+  
+bool isRouteGone(const Status& status) {
+  return !status && status.error.data.is_object() &&
+         status.error.data.value("reason", std::string{}) == "route_not_found";
+}
 
 const char* listKindName(ListKind kind) {
   switch (kind) {
@@ -138,9 +143,16 @@ Status McpServer::run() {
   Dispatcher dispatcher(tools_, options_.resources.get(),
                         options_.prompts.get(), std::move(config));
 
+  // D17: default to an internal pool. Hosts may inject their own executor, or
+  // opt into inline execution on the transport thread for deterministic tests.
+  std::shared_ptr<IExecutor> executor = options_.executor;
+  if (!executor && !options_.useInlineExecutor) {
+    executor = makeThreadPoolExecutor(4, 1024);
+  }
+
   bool cleaned = false;
   bool did_start = false;
-  auto cleanup = [this, &cleaned, &did_start]() noexcept {
+  auto cleanup = [this, &cleaned, &did_start, executor]() noexcept {
     if (cleaned) {
       return;
     }
@@ -152,8 +164,8 @@ Status McpServer::run() {
     }
     cv_.notify_all();
     try {
-      if (did_start && options_.executor) {
-        options_.executor->drain();
+      if (did_start && executor) {
+        executor->drain();
       }
     } catch (...) {
     }
@@ -223,7 +235,7 @@ Status McpServer::run() {
         return;
       }
       Status sent = transport_->sendTo(route, parsed.value());
-      if (!sent) {
+      if (!sent && !isRouteGone(sent)) {
         record_error(sent.error);
       }
     } catch (const std::exception& error) {
@@ -235,8 +247,6 @@ Status McpServer::run() {
                                   "failed to send response"));
     }
   };
-
-  const std::shared_ptr<IExecutor> executor = options_.executor;
 
   try {
     transport_->setOnMessageEx(
@@ -447,7 +457,7 @@ Status McpServer::run() {
           auto notify = [this, record_error, route](Json notification) {
             try {
               Status sent = transport_->sendTo(route, notification);
-              if (!sent) {
+              if (!sent && !isRouteGone(sent)) {
                 record_error(sent.error);
               }
             } catch (const std::exception& error) {

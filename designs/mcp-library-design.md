@@ -888,7 +888,8 @@ struct ServerOptions {
     std::shared_ptr<IAuthorizer> authorizer;        // 可选
     std::shared_ptr<IAuditHook> audit;              // 可选
     std::shared_ptr<IApprovalHook> approval;        // 可选
-    std::shared_ptr<IExecutor> executor;            // P2b 默认 nullptr=同步 dispatch；P3 切默认内部线程池（D17）
+    std::shared_ptr<IExecutor> executor;            // nullptr = 内部线程池（4/1024，P3 起，D17）
+    bool useInlineExecutor = false;                 // true = transport 线程同步执行（测试/单线程宿主）
     std::shared_ptr<IResourceProvider> resources;   // 可选；P2b 每类最多一个 provider（见 §14 说明）
     std::shared_ptr<IPromptProvider> prompts;       // 可选
     std::shared_ptr<ITimeSource> timeSource;        // nullptr = 系统时钟；无条件字段
