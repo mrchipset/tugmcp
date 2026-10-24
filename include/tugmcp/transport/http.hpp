@@ -17,12 +17,12 @@ struct TlsOptions {
   bool enabled = false;
   std::string certChainPath;
   std::string privateKeyPath;
-  std::string privateKeyPassword;
+  std::string privateKeyPassword;  // not wired yet (M2 remaining)
   std::string clientCaFile;
   bool verifyPeer = true;
   std::string caBundlePath;
-  std::string serverName;
-  std::string minVersion = "TLS1.2";
+  std::string serverName;          // client-only; not wired (SNI uses the URL host)
+  std::string minVersion = "TLS1.2";  // client-only; not wired
 };
 
 enum class AdmissionDecision { Accept, Reject, Emergency };

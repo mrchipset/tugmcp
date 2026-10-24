@@ -654,7 +654,7 @@ public:
 #endif
 ```
 
-编译模式下 `src/transport/*.cpp` 直接 include `httplib.h`，不使用 `detail/http_httplib.hpp`；该 detail 头是 header-only 专用。`detail/http_httplib.hpp` 负责 `CPPHTTPLIB_OPENSSL_SUPPORT` 定义顺序并守住上述一致性。
+**所有 TU 一律经 `detail/http_httplib.hpp` 单一入口 include httplib**（编译模式也如此）：该头按 `TUGMCP_TLS_ENABLED` 定义 `CPPHTTPLIB_OPENSSL_SUPPORT`，再 include `httplib.h`，最后用 `CPPHTTPLIB_SSL_ENABLED` 做一致性检查。任何 TU 直接 include `httplib.h` 都可能以不同宏实例化 httplib 的 inline 代码，链接期 COMDAT 折叠会选中错误的定义（曾导致 https 客户端抛 `'https' scheme is not supported`）。`detail/http_httplib.hpp` 因此不属于公共 API，只供 `tugmcp::http` 的消费者使用。
 
 **诚实边界：** header-only 模式**无法在链接期检测跨 TU 宏不一致**，因此只支持经 `tugmcp::http` CMake target 消费；不得声称运行期可检测。
 

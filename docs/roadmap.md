@@ -81,7 +81,7 @@
 5. **已知技术债**（Gate 3）：一次 `call` 约 12 次解析/序列化；`McpServer` 实现寄居 `dispatcher.cpp`；ODR 仅覆盖 3/9 公共头；`FakeTransport::emitClose` 未遵守「close 后不回调」；`core.hpp` umbrella 未收录新头。
 6. **P2-B 技术债（已完成）**：`decode(const Json&)`、`ITransport::sendRaw`、`src/core/server.cpp` 拆分、ODR 覆盖全部公共头、`FakeTransport` close 后不再回调。
 7. **HTTP stateless 约束**：pending 按 `RequestId` 关联，**并发客户端 id 必须全局唯一**（冲突 → 409）；工具在 HTTP 线程同步执行，**无执行超时**；`admission`/并发流限制字段已标注未接线。
-8. **TLS（已完成）**：`TUGMCP_TLS=ON` 已接线并通过 loopback（OpenSSL 3.0、宏/链接、SSLServer/SSLClient、工厂校验、自签 fixtures）。限制：cpp-httplib 无 server 侧握手错误回调；`serverName` 由 URL host 决定（无独立 SNI 设置）。`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`。
+8. **TLS（已完成）**：`TUGMCP_TLS=ON` 已接线并通过 loopback（OpenSSL 3.0、宏/链接、SSLServer/SSLClient、工厂校验、自签 fixtures）。限制：cpp-httplib 无 server 侧握手错误回调；`serverName`/`minVersion`/`privateKeyPassword` 未接线，**传入非默认值会显式失败**（`option_invalid`）；`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`。
 9. **P2–P4 未开始**：M2 协议面（SSE/MRTR/subscriptions/resources/prompts/admission）、M3/M4（2025 session/replay）、M5/M6（executor/hooks/legacy）、conformance。
 
 ## 6. 下一步优先级

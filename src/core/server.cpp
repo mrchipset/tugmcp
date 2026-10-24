@@ -49,7 +49,7 @@ Status McpServer::run() {
 
   transport_->setOnMessage([this, &dispatcher, record_error](Json incoming) {
     try {
-      auto decoded = decode(incoming.dump());
+      auto decoded = decode(incoming);
       if (!decoded.hasValue()) {
         record_error(decoded.error());
         return;
@@ -69,8 +69,7 @@ Status McpServer::run() {
         return;
       }
 
-      Json wire = Json::parse(encoded.value());
-      Status sent = transport_->send(wire);
+      Status sent = transport_->sendRaw(encoded.value());
       if (!sent) {
         record_error(sent.error);
       }

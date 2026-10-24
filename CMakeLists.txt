@@ -34,6 +34,10 @@ if(NOT TUGMCP_TLS_BACKEND STREQUAL "openssl")
   message(FATAL_ERROR "TUGMCP_TLS_BACKEND '${TUGMCP_TLS_BACKEND}' is not implemented yet (M2); only 'openssl' is supported")
 endif()
 
+if(TUGMCP_TLS AND NOT TUGMCP_WITH_HTTP)
+  message(FATAL_ERROR "TUGMCP_TLS=ON requires TUGMCP_WITH_HTTP=ON")
+endif()
+
 find_package(Threads REQUIRED)
 
 if(TUGMCP_VERIFY_3RD_HASHES)
@@ -104,9 +108,6 @@ if(TUGMCP_WITH_HTTP)
   target_link_libraries(tugmcp_http PUBLIC tugmcp::core)
   target_link_libraries(tugmcp_http PRIVATE tugmcp_3rd_httplib)
   if(TUGMCP_TLS)
-    if(NOT TUGMCP_WITH_HTTP)
-      message(FATAL_ERROR "TUGMCP_TLS=ON requires TUGMCP_WITH_HTTP=ON")
-    endif()
     find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
     target_compile_definitions(tugmcp_http PRIVATE
       TUGMCP_TLS_ENABLED=1

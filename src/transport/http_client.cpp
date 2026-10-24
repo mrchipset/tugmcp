@@ -97,6 +97,18 @@ public:
                          "unsupported_scheme",
                          Json{{"reason", "unsupported_scheme"}}));
     }
+
+    // These TLS knobs are not wired into cpp-httplib yet; accepting them would
+    // silently change security expectations, so fail loudly instead.
+    if (options_.tls.enabled &&
+        (!options_.tls.serverName.empty() ||
+         options_.tls.minVersion != "TLS1.2" ||
+         !options_.tls.privateKeyPassword.empty())) {
+      return Status::failure(McpError::make(
+          ErrorCode::InvalidParams,
+          "tls.serverName/minVersion/privateKeyPassword are not supported yet",
+          Json{{"reason", "option_invalid"}}));
+    }
 #if !TUGMCP_TLS_ENABLED
     if (scheme == "https") {
       return Status::failure(

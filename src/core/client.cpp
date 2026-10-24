@@ -222,7 +222,7 @@ public:
 private:
   void handleMessage(Json message) noexcept {
     try {
-      auto decoded = decode(message.dump());
+      auto decoded = decode(message);
       if (!decoded.hasValue() ||
           decoded.value().kind != MessageKind::Response) {
         ignored_responses_.fetch_add(1, std::memory_order_relaxed);

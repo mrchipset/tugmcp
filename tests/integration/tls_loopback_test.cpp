@@ -1,4 +1,4 @@
-#if TUGMCP_TLS_ENABLED
+﻿#if TUGMCP_TLS_ENABLED
 
 // TLS loopback: real OpenSSL via cpp-httplib, McpClient + McpServer over
 // https://localhost. No sleeps are used.
@@ -146,7 +146,7 @@ TEST_CASE("TLS client and server round-trip initialize, listTools and callTool")
   client_options.requestTimeout = std::chrono::milliseconds(5000);
   client_options.tls.enabled = true;
   client_options.tls.caBundlePath = fixtureDir() + "ca.pem";
-  client_options.tls.serverName = "localhost";
+
   client_options.tls.verifyPeer = true;
 
   auto created_client = makeStreamableHttpClientTransport(client_options);

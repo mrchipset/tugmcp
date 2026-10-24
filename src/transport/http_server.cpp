@@ -122,7 +122,7 @@ public:
 
     Message decoded;
     try {
-      auto result = decode(message.dump());
+      auto result = decode(message);
       if (!result.hasValue()) {
         return failure(ErrorCode::InternalError, "invalid response message");
       }
@@ -394,14 +394,12 @@ private:
         }
       }
 
-      Json document;
-      try {
-        document = Json::parse(request.body);
-      } catch (...) {
-        respondError(response, 400,
-                     McpError::make(ErrorCode::ParseError, "malformed JSON"));
+      auto parsed = parseStrict(request.body);
+      if (!parsed.hasValue()) {
+        respondError(response, 400, parsed.error());
         return;
       }
+      const Json& document = parsed.value();
 
       if (message.kind == MessageKind::Notification) {
         if (!invokeMessage(document)) {
