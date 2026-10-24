@@ -537,6 +537,28 @@ Status McpServer::run() {
                 send_response(metadata.route, response);
                 return;
               }
+              if (message.method == "resources/subscribe" &&
+                  options_.authorizer != nullptr) {
+                Status allowed;
+                try {
+                  allowed =
+                      options_.authorizer->authorize(metadata.auth, uri);
+                } catch (...) {
+                  allowed = Status::failure(McpError::make(
+                      ErrorCode::InternalError, "authorization failed"));
+                }
+                if (!allowed) {
+                  Message response;
+                  response.kind = MessageKind::Response;
+                  response.jsonrpc = "2.0";
+                  response.id = message.id;
+                  response.error = McpError::make(
+                      ErrorCode::InternalError, "forbidden",
+                      Json{{"reason", "forbidden"}});
+                  send_response(metadata.route, response);
+                  return;
+                }
+              }
               bool unknown_subscription = false;
               {
                 std::lock_guard<std::mutex> lock(logging_mutex_);

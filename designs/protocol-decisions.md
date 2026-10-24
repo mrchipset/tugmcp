@@ -297,6 +297,8 @@
 1. 新增公共头 `security.hpp`：`AuthContext{bool authenticated; std::string principal; std::vector<std::string> roles; Json attributes;}`、`Headers`、`IAuthenticator`、`IAuthorizer`、`ApprovalRequest/ApprovalResult`、`IApprovalHook`、`IAuditHook`（类型见 §18）。
 2. **认证在 transport**：`ServerOptions::auth` 由 `McpServer` 在 `start()` 前推送到 transport（`ITransport::setAuthenticator`）；HTTP 用请求头调用，失败 → HTTP 401 + JSON-RPC error `data.reason="unauthorized"`（保留 id，body 可解析时）。stdio 无头，默认不启用认证。
 3. **授权在 dispatcher**：`IAuthorizer::authorize(auth, toolOrResource)` 在 `tools/call`/`resources/read`/`prompts/get` 前调用；拒绝 → JSON-RPC `-32603` + `data.reason="forbidden"`，HTTP 403。
+   - `resources/subscribe` 的 URI 也必须授权（2025）；`resources/unsubscribe` 允许已授权会话。
+   - **list 方法（tools/resources/prompts list）是公开枚举**：库不做逐项过滤；宿主不得把未授权可见的 descriptor 注册进去。此边界显式记录，避免误以为 list 受 `IAuthorizer` 保护。
 4. **审批在授权后**：仅 `tools/call`；`IApprovalHook::approve(ApprovalRequest)` 返回 future；等待受超时（默认 30s）与 `CancellationToken` 约束；拒绝 → `-32603` + `data.reason="approval_denied"`，超时 `approval_timeout`，HTTP 403。
 5. **审计**：`IAuditHook::onEvent(auth, event, detail)`；事件至少 `tool_call`/`resource_read`/`prompt_get`/`authorization_denied`/`approval_denied`/`approval_timeout`/`auth_failed`。实现异常必须被库收敛：`onError` 上报 `-32603` + `data.reason="audit_failed"`，请求继续（审计不是鉴权，不改变放行结果）。
 6. `RequestContext` 增加 `AuthContext auth`；`MessageMetadata` 增加 `AuthContext auth`，由 transport 填、dispatcher 转。

@@ -2,6 +2,8 @@
 
 #include "tugmcp/detail/http_httplib.hpp"
 
+#include "http_security.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -47,7 +49,7 @@ std::string makeSessionId() {
 Headers collectHeaders(const httplib::Request& request) {
   Headers headers;
   for (const auto& item : request.headers) {
-    headers[item.first] = item.second;
+    headers[detail::asciiLower(item.first)] = item.second;
   }
   return headers;
 }
@@ -157,6 +159,15 @@ public:
     return enqueue(session, message);
   }
 
+  Status sendToSession(std::string_view sessionId, const Json& message) {
+    return sendTo(sessionId, message);
+  }
+
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    on_session_closed_ = std::move(handler);
+  }
   void setOnMessage(std::function<void(Json)> handler) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     on_message_ = std::move(handler);
@@ -202,9 +213,12 @@ public:
       }
     }
     for (const auto& session : sessions) {
-      std::lock_guard<std::mutex> lock(session->mutex);
-      session->closed = true;
-      session->cv.notify_all();
+      {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        session->closed = true;
+        session->cv.notify_all();
+      }
+      notifySessionClosed(session->id);
     }
     std::thread listener;
     {
@@ -232,6 +246,7 @@ public:
 private:
   struct Session {
     std::string id;
+    AuthContext auth;
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<std::string> frames;
@@ -257,10 +272,25 @@ private:
       on_message_ex_ = nullptr;
       on_error_ = nullptr;
       on_close_ = nullptr;
+      on_session_closed_ = nullptr;
     }
     if (notify && handler) {
       try {
         handler();
+      } catch (...) {
+      }
+    }
+  }
+
+  void notifySessionClosed(const std::string& id) noexcept {
+    std::function<void(const std::string&)> handler;
+    {
+      std::lock_guard<std::mutex> lock(callback_mutex_);
+      handler = on_session_closed_;
+    }
+    if (handler) {
+      try {
+        handler(id);
       } catch (...) {
       }
     }
@@ -280,27 +310,27 @@ private:
     }
   }
 
-  bool authenticate(const httplib::Request& request) {
+  AuthContext authenticate(const httplib::Request& request, bool& failed) {
+    failed = false;
     std::shared_ptr<IAuthenticator> authenticator;
     {
       std::lock_guard<std::mutex> lock(security_mutex_);
       authenticator = options_.auth;
     }
     if (!authenticator) {
-      return true;
+      return AuthContext{};
     }
     try {
       auto result = authenticator->authenticate(collectHeaders(request));
       if (result.hasValue()) {
-        auth_ = result.value();
-        return true;
+        return result.value();
       }
     } catch (...) {
     }
+    failed = true;
     auditAuthFailed();
-    return false;
+    return AuthContext{};
   }
-
   void auditAuthFailed() noexcept {
     std::shared_ptr<IAuditHook> audit;
     {
@@ -322,6 +352,13 @@ private:
 
   Status enqueueLocked(const std::shared_ptr<Session>& session,
                        const Json& message) {
+    if (options_.perStreamQueue != 0 &&
+        session->frames.size() >= options_.perStreamQueue) {
+      session->closed = true;
+      session->cv.notify_all();
+      return failure(ErrorCode::InternalError, "stream overflow",
+                     Json{{"reason", "route_not_found"}});
+    }
     try {
       session->frames.push_back(
           "event: message\ndata: " + message.dump() + "\n\n");
@@ -355,7 +392,7 @@ private:
       {
         std::unique_lock<std::mutex> lock(session->mutex);
         if (session->frames.empty() && !session->closed) {
-          session->cv.wait_for(lock, std::chrono::milliseconds(100));
+          session->cv.wait_for(lock, std::chrono::milliseconds(500));
         }
         if (session->closed && session->frames.empty()) {
           return false;
@@ -390,7 +427,16 @@ private:
       response.status = 410;
       return;
     }
-    if (!authenticate(request)) {
+    if (!detail::hostAllowed(request.get_header_value("Host"),
+                             options_.allowedHosts) ||
+        !detail::originAllowed(request.get_header_value("Origin"),
+                               options_.allowedOrigins)) {
+      response.status = 403;
+      return;
+    }
+    bool auth_failed = false;
+    const AuthContext auth = authenticate(request, auth_failed);
+    if (auth_failed) {
       response.status = 401;
       response.set_content(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"unauthorized","data":{"reason":"unauthorized"}}})",
                            "application/json");
@@ -398,8 +444,14 @@ private:
     }
     auto session = std::make_shared<Session>();
     session->id = makeSessionId();
+    session->auth = auth;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
+      if (options_.maxSessions != 0 &&
+          sessions_.size() >= options_.maxSessions) {
+        response.status = 429;
+        return;
+      }
       sessions_[session->id] = session;
     }
     response.set_header("Cache-Control", "no-cache");
@@ -415,19 +467,30 @@ private:
             std::lock_guard<std::mutex> lock(routes_mutex_);
             sessions_.erase(route);
           }
-          std::lock_guard<std::mutex> lock(session->mutex);
-          session->closed = true;
-          session->cv.notify_all();
+          {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            session->closed = true;
+            session->cv.notify_all();
+          }
+          notifySessionClosed(route);
         });
   }
-
   void handleMessages(const httplib::Request& request,
                       httplib::Response& response) {
     if (closed_.load(std::memory_order_acquire)) {
       response.status = 410;
       return;
     }
-    if (!authenticate(request)) {
+    if (!detail::hostAllowed(request.get_header_value("Host"),
+                             options_.allowedHosts) ||
+        !detail::originAllowed(request.get_header_value("Origin"),
+                               options_.allowedOrigins)) {
+      response.status = 403;
+      return;
+    }
+    bool auth_failed = false;
+    const AuthContext auth = authenticate(request, auth_failed);
+    if (auth_failed) {
       response.status = 401;
       response.set_content(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"unauthorized","data":{"reason":"unauthorized"}}})",
                            "application/json");
@@ -446,10 +509,20 @@ private:
       response.status = 400;
       return;
     }
+    std::shared_ptr<Session> session;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
-      if (sessions_.find(session_id) == sessions_.end()) {
+      const auto it = sessions_.find(session_id);
+      if (it == sessions_.end()) {
         response.status = 404;
+        return;
+      }
+      session = it->second;
+    }
+    {
+      std::lock_guard<std::mutex> lock(session->mutex);
+      if (session->closed) {
+        response.status = 410;
         return;
       }
     }
@@ -463,8 +536,7 @@ private:
     metadata.protocolVersion = "2025-11-25";
     metadata.route = session_id;
     metadata.sessionId = session_id;
-    metadata.auth = auth_;
-
+    metadata.auth = auth;
     auto invoke = [this, &metadata](const Json& message) {
       MessageHandlerEx extended;
       std::function<void(Json)> simple;
@@ -508,9 +580,9 @@ private:
   MessageHandlerEx on_message_ex_;
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
+  std::function<void(const std::string&)> on_session_closed_;
 
   std::mutex security_mutex_;
-  AuthContext auth_;
 
   std::mutex routes_mutex_;
   std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
@@ -555,6 +627,14 @@ void LegacySseServerTransport::setAuditHook(
 void LegacySseServerTransport::setSupportedVersions(
     std::vector<std::string> versions) {
   impl_->setSupportedVersions(std::move(versions));
+}
+void LegacySseServerTransport::setOnSessionClosed(
+    std::function<void(const std::string&)> handler) {
+  impl_->setOnSessionClosed(std::move(handler));
+}
+Status LegacySseServerTransport::sendToSession(
+    std::string_view sessionId, const Json& message) {
+  return impl_->sendToSession(sessionId, message);
 }
 void LegacySseServerTransport::close() { impl_->close(); }
 int LegacySseServerTransport::boundPort() const { return impl_->boundPort(); }
@@ -639,6 +719,15 @@ public:
     return send(message);
   }
 
+  Status sendToSession(std::string_view sessionId, const Json& message) {
+    return sendTo(sessionId, message);
+  }
+
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    on_session_closed_ = std::move(handler);
+  }
   void setOnMessage(std::function<void(Json)> handler) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     on_message_ = std::move(handler);
@@ -739,6 +828,7 @@ private:
       on_message_ = nullptr;
       on_error_ = nullptr;
       on_close_ = nullptr;
+      on_session_closed_ = nullptr;
     }
     if (notify && handler) {
       try {
@@ -868,6 +958,7 @@ private:
   std::function<void(Json)> on_message_;
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
+  std::function<void(const std::string&)> on_session_closed_;
 
   std::mutex endpoint_mutex_;
   std::condition_variable endpoint_cv_;

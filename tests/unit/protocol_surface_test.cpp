@@ -1,4 +1,6 @@
+#include <chrono>
 #include <cstdint>
+#include <future>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -19,6 +21,10 @@ using mcp::v1::Dispatcher;
 using mcp::v1::DispatchConfig;
 using mcp::v1::ErrorCode;
 using mcp::v1::InputRequired;
+using mcp::v1::ApprovalRequest;
+using mcp::v1::ApprovalResult;
+using mcp::v1::CancellationToken;
+using mcp::v1::IApprovalHook;
 using mcp::v1::ICompletionProvider;
 using mcp::v1::IProgressSink;
 using mcp::v1::IPromptProvider;
@@ -793,6 +799,66 @@ TEST_CASE("protocol surface: 2026 requires namespaced _meta") {
   REQUIRE(typed_response->error.has_value());
   CHECK(static_cast<int>(typed_response->error->code) ==
         static_cast<int>(ErrorCode::InvalidParams));
+}
+
+class AsyncApproval final : public IApprovalHook {
+public:
+  std::future<ApprovalResult> approve(const ApprovalRequest&) override {
+    auto future = promise_.get_future();
+    return std::async(std::launch::async,
+                      [future = std::move(future)]() mutable {
+                        return future.get();
+                      });
+  }
+  void release() {
+    ApprovalResult result;
+    result.approved = true;
+    result.reason = "released";
+    promise_.set_value(result);
+  }
+
+private:
+  std::promise<ApprovalResult> promise_;
+};
+TEST_CASE("protocol surface: approval timeout and cancellation bound the call") {
+  ToolRegistry registry;
+  bool invoked = false;
+  addTool(registry, "approval", [&invoked](const Json&, RequestContext&,
+                                   IProgressSink&) {
+    invoked = true;
+    return completeText("done");
+  });
+  AsyncApproval approval;
+  DispatchConfig config;
+  config.approval = &approval;
+  config.approvalTimeout = std::chrono::milliseconds(100);
+  auto dispatcher = makeDispatcher(registry, nullptr, nullptr, config);
+  const Json params = Json{{"name", "approval"},
+                          {"arguments", Json::object()}};
+  const auto started = std::chrono::steady_clock::now();
+  auto timed_out = dispatcher.dispatch(request("tools/call", params), kV2026);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  REQUIRE(timed_out.has_value());
+  REQUIRE(timed_out->error.has_value());
+  CHECK(timed_out->error->data.at("reason") == "approval_timeout");
+  CHECK(elapsed < std::chrono::seconds(1));
+  CHECK_FALSE(invoked);
+  approval.release();
+
+  AsyncApproval cancelled_approval;
+  DispatchConfig cancelled_config;
+  cancelled_config.approval = &cancelled_approval;
+  cancelled_config.approvalTimeout = std::chrono::seconds(5);
+  auto cancelled_dispatcher =
+      makeDispatcher(registry, nullptr, nullptr, cancelled_config);
+  auto token = std::make_shared<CancellationToken>();
+  token->cancel();
+  auto cancelled = cancelled_dispatcher.dispatch(
+      request("tools/call", params), kV2026, {}, token);
+  REQUIRE(cancelled.has_value());
+  REQUIRE(cancelled->error.has_value());
+  CHECK(cancelled->error->data.at("reason") == "approval_denied");
+  cancelled_approval.release();
 }
 
 TEST_CASE("protocol surface: client capabilities reach RequestContext") {

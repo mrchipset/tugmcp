@@ -18,6 +18,7 @@ namespace mcp {
 namespace v1 {
 
 using Json = nlohmann::json;
+// Header names are lowercased before reaching IAuthenticator.
 using Headers = std::map<std::string, std::string>;
 
 class CancellationToken;
@@ -35,6 +36,8 @@ public:
   virtual Result<AuthContext> authenticate(const Headers& headers) = 0;
 };
 
+// Authorizes individual tool/resource/prompt operations. It does not filter
+// list results; lists remain explicit public enumeration (D20).
 class IAuthorizer {
 public:
   virtual ~IAuthorizer() = default;
@@ -62,6 +65,8 @@ public:
   virtual std::future<ApprovalResult> approve(const ApprovalRequest&) = 0;
 };
 
+// Observes pre-execution authorization/approval events only; audit errors
+// never change authorization or execution outcomes.
 class IAuditHook {
 public:
   virtual ~IAuditHook() = default;

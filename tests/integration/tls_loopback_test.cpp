@@ -72,9 +72,18 @@ public:
 
   Status start() override { return inner_->start(); }
   Status send(const Json& message) override { return inner_->send(message); }
+  Status sendTo(std::string_view route, const Json& message) override {
+    return inner_->sendTo(route, message);
+  }
+  Status sendToSession(std::string_view id, const Json& message) override {
+    return inner_->sendToSession(id, message);
+  }
 
   void setOnMessage(std::function<void(Json)> handler) override {
     inner_->setOnMessage(std::move(handler));
+  }
+  void setOnMessageEx(mcp::v1::MessageHandlerEx handler) override {
+    inner_->setOnMessageEx(std::move(handler));
   }
 
   void setOnError(std::function<void(McpError)> handler) override {
@@ -89,6 +98,20 @@ public:
     }
   }
 
+  void setSupportedVersions(std::vector<std::string> versions) override {
+    inner_->setSupportedVersions(std::move(versions));
+  }
+  void setOnRouteClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnRouteClosed(std::move(handler));
+  }
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnSessionClosed(std::move(handler));
+  }
+  bool supportsStreaming() const override {
+    return inner_->supportsStreaming();
+  }
   void close() override { inner_->close(); }
 
 private:
@@ -268,9 +291,37 @@ TEST_CASE("TLS 2025 session and GET stream smoke") {
   core_client_options.protocolVersion = "2025-11-25";
   McpClient client(core_client_options, created_client.value());
 
+  std::promise<void> notification_ready;
+  auto notification_future = notification_ready.get_future();
+  client.setOnNotification([&](const Json& notification) {
+    if (notification.value("method", std::string{}) ==
+        "notifications/message") {
+      try {
+        notification_ready.set_value();
+      } catch (...) {
+      }
+    }
+  });
+
   const Status connected = client.connect();
   REQUIRE(connected.ok);
   REQUIRE_FALSE(client.sessionId().empty());
+
+  Status notified = Status::failure(McpError::make(
+      mcp::v1::ErrorCode::InternalError, "stream not ready"));
+  const auto notify_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!notified && std::chrono::steady_clock::now() < notify_deadline) {
+    notified = server.sendNotification(
+        client.sessionId(), "notifications/message",
+        Json{{"data", "tls-notify"}});
+    if (!notified) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  REQUIRE(notified.ok);
+  REQUIRE(notification_future.wait_for(std::chrono::seconds(2)) ==
+          std::future_status::ready);
 
   auto listed = client.listTools();
   REQUIRE(listed.hasValue());

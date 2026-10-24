@@ -178,7 +178,7 @@ void add_tool(McpServer& server, const std::string& name) {
 class GoodAuthenticator final : public IAuthenticator {
 public:
   Result<AuthContext> authenticate(const Headers& headers) override {
-    const auto it = headers.find("Authorization");
+    const auto it = headers.find("authorization");
     if (it == headers.end() || it->second != "Bearer good") {
       return Result<AuthContext>::failure(mcp::v1::McpError::make(
           mcp::v1::ErrorCode::InternalError, "unauthorized"));
@@ -530,6 +530,80 @@ TEST_CASE("2025 authentication failure and success") {
                             "application/json");
   REQUIRE(listed);
   CHECK(listed->status == 200);
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("2025 resource subscribe authorization allow and deny") {
+  ServerOptions options;
+  options.authorizer = std::make_shared<DenyAuthorizer>();
+  RunningServer running(options);
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers init_headers;
+  init_headers.emplace("Accept", "application/json");
+  init_headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  const Json init_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 1},
+           {"method", "initialize"},
+           {"params", Json{{"protocolVersion", "2025-11-25"}}}};
+  auto initialized = client.Post("/mcp", init_headers, init_body.dump(),
+                                 "application/json");
+  REQUIRE(initialized);
+  REQUIRE(initialized->status == 200);
+  const std::string session_id =
+      initialized->get_header_value("MCP-Session-Id");
+  REQUIRE_FALSE(session_id.empty());
+
+  httplib::Headers headers;
+  headers.emplace("Accept", "application/json");
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("MCP-Session-Id", session_id);
+
+  const Json denied_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 2},
+           {"method", "resources/subscribe"},
+           {"params", Json{{"uri", "test://denied"}}}};
+  auto denied = client.Post("/mcp", headers, denied_body.dump(),
+                            "application/json");
+  REQUIRE(denied);
+  CHECK(denied->status == 403);
+  CHECK(Json::parse(denied->body).at("error").at("data").at("reason") ==
+        "forbidden");
+
+  const Json allowed_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 3},
+           {"method", "resources/subscribe"},
+           {"params", Json{{"uri", "test://allowed"}}}};
+  auto allowed = client.Post("/mcp", headers, allowed_body.dump(),
+                             "application/json");
+  REQUIRE(allowed);
+  CHECK(allowed->status == 200);
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("GET and DELETE authentication failures return 401") {
+  ServerOptions options;
+  options.auth = std::make_shared<GoodAuthenticator>();
+  RunningServer running(options);
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  auto get = client.Get("/mcp", headers);
+  REQUIRE(get);
+  CHECK(get->status == 401);
+
+  auto remove = client.Delete("/mcp", headers);
+  REQUIRE(remove);
+  CHECK(remove->status == 401);
 
   client.stop();
   running.stop();

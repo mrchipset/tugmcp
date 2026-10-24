@@ -79,6 +79,17 @@ struct SecurityHooks {
   std::function<void(McpError)> onError;
 };
 
+void discardFuture(std::future<ApprovalResult> future) noexcept {
+  try {
+    std::thread([future = std::move(future)]() mutable {
+      try {
+        future.wait();
+      } catch (...) {
+      }
+    }).detach();
+  } catch (...) {
+  }
+}
 void auditEvent(const SecurityHooks& security, const AuthContext& auth,
                 const char* event, const Json& detail) noexcept {
   if (security.audit == nullptr) {
@@ -517,6 +528,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
       if (token && token->cancelled()) {
         auditEvent(security, auth, "approval_denied",
                    Json{{"tool", name}, {"reason", "cancelled"}});
+        discardFuture(std::move(future));
         return Result<Json>::failure(McpError::make(
             ErrorCode::InternalError, "approval denied",
             Json{{"reason", "approval_denied"}}));
@@ -524,6 +536,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
       if (std::chrono::steady_clock::now() >= approval.deadline) {
         auditEvent(security, auth, "approval_timeout",
                    Json{{"tool", name}});
+        discardFuture(std::move(future));
         return Result<Json>::failure(McpError::make(
             ErrorCode::InternalError, "approval timed out",
             Json{{"reason", "approval_timeout"}}));

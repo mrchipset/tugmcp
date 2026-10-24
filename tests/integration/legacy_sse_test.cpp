@@ -27,7 +27,9 @@ using mcp::v1::AuthContext;
 using mcp::v1::ContentBlock;
 using mcp::v1::ContentType;
 using mcp::v1::Headers;
+using mcp::v1::IAuditHook;
 using mcp::v1::IAuthenticator;
+using mcp::v1::IAuthorizer;
 using mcp::v1::IToolHandler;
 using mcp::v1::ITransport;
 using mcp::v1::Json;
@@ -63,18 +65,63 @@ public:
   }
 };
 
+class PrincipalTool final : public IToolHandler {
+public:
+  Result<ToolOutcome> invoke(const Json&, RequestContext& context,
+                             mcp::v1::IProgressSink&) override {
+    ToolResult result;
+    result.content.push_back(
+        ContentBlock{ContentType::Text, context.auth.principal});
+    return ToolOutcome(std::move(result));
+  }
+};
+
 class GoodAuthenticator final : public IAuthenticator {
 public:
   Result<AuthContext> authenticate(const Headers& headers) override {
-    const auto it = headers.find("Authorization");
-    if (it == headers.end() || it->second != "Bearer good") {
+    const auto it = headers.find("authorization");
+    if (it == headers.end()) {
       return Result<AuthContext>::failure(mcp::v1::McpError::make(
           mcp::v1::ErrorCode::InternalError, "unauthorized"));
     }
     AuthContext auth;
-    auth.authenticated = true;
+    if (it->second == "Bearer good") {
+      auth.authenticated = true;
+      auth.principal = "good";
+    } else if (it->second == "Bearer alice") {
+      auth.authenticated = true;
+      auth.principal = "alice";
+    } else if (it->second == "Bearer bob") {
+      auth.authenticated = true;
+      auth.principal = "bob";
+    } else {
+      return Result<AuthContext>::failure(mcp::v1::McpError::make(
+          mcp::v1::ErrorCode::InternalError, "unauthorized"));
+    }
     return auth;
   }
+};
+
+class RecordingAudit final : public IAuditHook {
+public:
+  void onEvent(const AuthContext& auth, std::string_view event,
+               const Json&) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.push_back({std::string(event), auth.principal});
+  }
+  bool hasPrincipal(const std::string& principal) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& item : events_) {
+      if (item.second == principal) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::vector<std::pair<std::string, std::string>> events_;
 };
 
 class RunningLegacyServer {
@@ -91,11 +138,18 @@ public:
 
     ServerOptions core_options;
     core_options.allowUnvalidatedTools = true;
+    core_options.auth = options.auth;
+    core_options.audit = options.audit;
     server_ = std::make_unique<McpServer>(core_options, transport_);
     ToolDescriptor descriptor;
     descriptor.name = "echo";
     descriptor.inputSchema = Json{{"type", "object"}};
     server_->tools().add(std::move(descriptor), std::make_shared<EchoTool>());
+    ToolDescriptor who;
+    who.name = "who";
+    who.inputSchema = Json{{"type", "object"}};
+    server_->tools().add(std::move(who),
+                          std::make_shared<PrincipalTool>());
   }
 
   ~RunningLegacyServer() { stop(); }
@@ -133,12 +187,17 @@ struct Reader {
   std::thread thread;
 };
 
-void startReader(int port, Reader& reader) {
+void startReader(int port, Reader& reader,
+                 const std::string& authorization = {}) {
   reader.client = std::make_shared<httplib::Client>(baseUrlFor(port));
   reader.client->set_read_timeout(std::chrono::milliseconds(200));
   auto client = reader.client;
-  reader.thread = std::thread([client, &reader] {
-    client->Get("/sse", [&reader](const char* data, std::size_t size) {
+  reader.thread = std::thread([client, &reader, authorization] {
+    httplib::Headers headers;
+    if (!authorization.empty()) {
+      headers.emplace("Authorization", authorization);
+    }
+    client->Get("/sse", headers, [&reader](const char* data, std::size_t size) {
       std::lock_guard<std::mutex> lock(reader.mutex);
       reader.data.append(data, size);
       reader.cv.notify_all();
@@ -181,12 +240,17 @@ std::string extractEndpoint(const std::string& data) {
   return data.substr(value_start, end - value_start);
 }
 
-int postMessages(int port, const std::string& path, const std::string& body) {
+int postMessages(int port, const std::string& path, const std::string& body,
+                 const std::string& authorization = {}) {
   httplib::Client client(baseUrlFor(port));
   client.set_connection_timeout(std::chrono::seconds(2));
   client.set_read_timeout(std::chrono::seconds(2));
   client.set_write_timeout(std::chrono::seconds(2));
-  auto response = client.Post(path, body, "application/json");
+  httplib::Headers headers;
+  if (!authorization.empty()) {
+    headers.emplace("Authorization", authorization);
+  }
+  auto response = client.Post(path, headers, body, "application/json");
   const int status = response ? response->status : -1;
   client.stop();
   return status;
@@ -321,4 +385,117 @@ TEST_CASE("legacy SSE client transport loopback") {
 
   client.close();
   running.stop();
+}
+TEST_CASE("legacy SSE keeps authentication contexts isolated") {
+  LegacySseServerOptions server_options;
+  server_options.auth = std::make_shared<GoodAuthenticator>();
+  auto audit = std::make_shared<RecordingAudit>();
+  server_options.audit = audit;
+  RunningLegacyServer running(server_options);
+  running.start();
+
+  Reader alice;
+  Reader bob;
+  startReader(running.port(), alice, "Bearer alice");
+  startReader(running.port(), bob, "Bearer bob");
+  REQUIRE(waitForText(alice, "event: endpoint", std::chrono::seconds(2)));
+  REQUIRE(waitForText(bob, "event: endpoint", std::chrono::seconds(2)));
+  const std::string alice_endpoint = extractEndpoint(snapshot(alice));
+  const std::string bob_endpoint = extractEndpoint(snapshot(bob));
+  REQUIRE_FALSE(alice_endpoint.empty());
+  REQUIRE_FALSE(bob_endpoint.empty());
+
+  CHECK(postMessages(running.port(), alice_endpoint,
+                     initializeBody(1).dump(), "Bearer alice") == 202);
+  CHECK(postMessages(running.port(), bob_endpoint,
+                     initializeBody(2).dump(), "Bearer bob") == 202);
+
+  const Json who = Json{{"jsonrpc", "2.0"},
+                        {"id", 3},
+                        {"method", "tools/call"},
+                        {"params", Json{{"name", "who"},
+                                        {"arguments", Json::object()}}}};
+  CHECK(postMessages(running.port(), alice_endpoint, who.dump(),
+                     "Bearer alice") == 202);
+  CHECK(postMessages(running.port(), bob_endpoint, who.dump(),
+                     "Bearer bob") == 202);
+
+  REQUIRE(waitForText(alice, "alice", std::chrono::seconds(2)));
+  REQUIRE(waitForText(bob, "bob", std::chrono::seconds(2)));
+  CHECK(snapshot(alice).find("bob") == std::string::npos);
+  CHECK(snapshot(bob).find("alice") == std::string::npos);
+  CHECK(audit->hasPrincipal("alice"));
+  CHECK(audit->hasPrincipal("bob"));
+
+  stopReader(alice);
+  stopReader(bob);
+  running.stop();
+}
+
+TEST_CASE("legacy SSE routes resource update notifications via sendToSession") {
+  RunningLegacyServer running(LegacySseServerOptions{});
+  running.start();
+
+  Reader reader;
+  startReader(running.port(), reader);
+  REQUIRE(waitForText(reader, "event: endpoint", std::chrono::seconds(2)));
+  const std::string endpoint = extractEndpoint(snapshot(reader));
+  REQUIRE_FALSE(endpoint.empty());
+  CHECK(postMessages(running.port(), endpoint, initializeBody(1).dump()) ==
+        202);
+
+  const std::string uri = "test://legacy-watched";
+  const Json subscribe_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 2},
+           {"method", "resources/subscribe"},
+           {"params", Json{{"uri", uri}}}};
+  CHECK(postMessages(running.port(), endpoint, subscribe_body.dump()) == 202);
+
+  REQUIRE(waitForText(reader, "\"id\":2", std::chrono::seconds(2)));
+  running.server().notifyResourceUpdated(uri);
+  REQUIRE(waitForText(reader, "notifications/resources/updated",
+                      std::chrono::seconds(2)));
+  CHECK(snapshot(reader).find(uri) != std::string::npos);
+  CHECK_FALSE(running.server().lastError().has_value());
+
+  stopReader(reader);
+  running.stop();
+}
+
+TEST_CASE("legacy SSE honours Host/Origin and maxSessions") {
+  RunningLegacyServer running(LegacySseServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers bad_host;
+  bad_host.emplace("Host", "evil.example.com");
+  auto host_response = client.Get("/sse", bad_host);
+  REQUIRE(host_response);
+  CHECK(host_response->status == 403);
+
+  httplib::Headers bad_origin;
+  bad_origin.emplace("Origin", "null");
+  auto origin_response = client.Get("/sse", bad_origin);
+  REQUIRE(origin_response);
+  CHECK(origin_response->status == 403);
+  client.stop();
+  running.stop();
+
+  LegacySseServerOptions limited;
+  limited.maxSessions = 1;
+  RunningLegacyServer capped(limited);
+  capped.start();
+  Reader reader;
+  startReader(capped.port(), reader);
+  REQUIRE(waitForText(reader, "event: endpoint", std::chrono::seconds(2)));
+
+  httplib::Client second(baseUrlFor(capped.port()));
+  auto second_response = second.Get("/sse");
+  REQUIRE(second_response);
+  CHECK(second_response->status == 429);
+  second.stop();
+
+  stopReader(reader);
+  capped.stop();
 }

@@ -2,6 +2,8 @@
 
 #include "tugmcp/detail/http_httplib.hpp"
 
+#include "http_security.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -37,7 +39,7 @@ bool isJsonContentType(const std::string& value) {
 Headers collectHeaders(const httplib::Request& request) {
   Headers headers;
   for (const auto& item : request.headers) {
-    headers[item.first] = item.second;
+    headers[detail::asciiLower(item.first)] = item.second;
   }
   return headers;
 }
@@ -51,84 +53,6 @@ bool hasProgressToken(const Message& message) {
   return message.params.is_object() && message.params.contains("_meta") &&
          message.params.at("_meta").is_object() &&
          message.params.at("_meta").contains("progressToken");
-}
-
-std::string asciiLower(std::string value) {
-  for (char& character : value) {
-    character = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(character)));
-  }
-  return value;
-}
-
-std::string hostFromAuthority(const std::string& authority) {
-  if (authority.empty()) {
-    return {};
-  }
-  if (authority.front() == '[') {
-    const std::size_t end = authority.find(']');
-    if (end == std::string::npos) {
-      return asciiLower(authority);
-    }
-    return asciiLower(authority.substr(1, end - 1));
-  }
-  const std::size_t colon = authority.rfind(':');
-  if (colon != std::string::npos &&
-      authority.find(':') == colon) {
-    return asciiLower(authority.substr(0, colon));
-  }
-  return asciiLower(authority);
-}
-
-bool isLoopbackHost(const std::string& host) {
-  return host == "127.0.0.1" || host == "localhost" || host == "::1";
-}
-
-bool listMatches(const std::vector<std::string>& list,
-                 const std::string& value) {
-  const std::string candidate = asciiLower(value);
-  for (const auto& item : list) {
-    if (item == "*" || asciiLower(item) == candidate) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool hostAllowed(const std::string& host_header,
-                 const std::vector<std::string>& allowed_hosts) {
-  if (host_header.empty()) {
-    return false;
-  }
-  const std::string host = hostFromAuthority(host_header);
-  if (isLoopbackHost(host)) {
-    return true;
-  }
-  return listMatches(allowed_hosts, host);
-}
-
-bool originAllowed(const std::string& origin,
-                   const std::vector<std::string>& allowed_origins) {
-  if (origin.empty()) {
-    return true;
-  }
-  if (origin == "null") {
-    return false;
-  }
-  const std::size_t scheme_end = origin.find("://");
-  const std::string authority =
-      scheme_end == std::string::npos
-          ? origin
-          : origin.substr(scheme_end + 3);
-  const std::size_t path = authority.find('/');
-  const std::string host =
-      hostFromAuthority(path == std::string::npos
-                            ? authority
-                            : authority.substr(0, path));
-  if (isLoopbackHost(host)) {
-    return true;
-  }
-  return listMatches(allowed_origins, origin);
 }
 
 #if TUGMCP_TLS_ENABLED
@@ -803,9 +727,9 @@ private:
   void handleGet(const httplib::Request& request,
                  httplib::Response& response) {
     try {
-      if (!hostAllowed(request.get_header_value("Host"),
+      if (!detail::hostAllowed(request.get_header_value("Host"),
                        options_.allowedHosts) ||
-          !originAllowed(request.get_header_value("Origin"),
+          !detail::originAllowed(request.get_header_value("Origin"),
                          options_.allowedOrigins)) {
         response.status = 403;
         return;
@@ -934,9 +858,9 @@ private:
   void handleDelete(const httplib::Request& request,
                     httplib::Response& response) {
     try {
-      if (!hostAllowed(request.get_header_value("Host"),
+      if (!detail::hostAllowed(request.get_header_value("Host"),
                        options_.allowedHosts) ||
-          !originAllowed(request.get_header_value("Origin"),
+          !detail::originAllowed(request.get_header_value("Origin"),
                          options_.allowedOrigins)) {
         response.status = 403;
         return;
@@ -1298,9 +1222,9 @@ private:
   void handlePost(const httplib::Request& request,
                   httplib::Response& response) {
     try {
-      if (!hostAllowed(request.get_header_value("Host"),
+      if (!detail::hostAllowed(request.get_header_value("Host"),
                        options_.allowedHosts) ||
-          !originAllowed(request.get_header_value("Origin"),
+          !detail::originAllowed(request.get_header_value("Origin"),
                          options_.allowedOrigins)) {
         response.status = 403;
         return;
