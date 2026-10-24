@@ -1,4 +1,4 @@
-﻿#include "tugmcp/transport/http.hpp"
+#include "tugmcp/transport/http.hpp"
 
 #include "tugmcp/detail/http_httplib.hpp"
 
@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <tugmcp/error.hpp>
 #include <tugmcp/message.hpp>
@@ -279,10 +280,10 @@ public:
         // invalid.
         if (!options_.tls.certChainPath.empty() &&
             !options_.tls.privateKeyPath.empty()) {
-          client_ = std::make_unique<httplib::Client>(
+          client_ = std::make_shared<httplib::Client>(
               base, options_.tls.certChainPath, options_.tls.privateKeyPath);
         } else {
-          client_ = std::make_unique<httplib::Client>(base);
+          client_ = std::make_shared<httplib::Client>(base);
         }
         if (!options_.tls.caBundlePath.empty()) {
           client_->set_ca_cert_path(options_.tls.caBundlePath);
@@ -291,10 +292,10 @@ public:
             options_.tls.verifyPeer);
         client_->enable_server_hostname_verification(options_.tls.verifyPeer);
       } else {
-        client_ = std::make_unique<httplib::Client>(base);
+        client_ = std::make_shared<httplib::Client>(base);
       }
 #else
-      client_ = std::make_unique<httplib::Client>(base);
+      client_ = std::make_shared<httplib::Client>(base);
 #endif
     } catch (const std::exception& error) {
       client_.reset();
@@ -324,22 +325,79 @@ public:
     return Status::success();
   }
 
-  Status send(const Json& message) override {
-    std::unique_lock<std::mutex> send_lock(send_mutex_);
+  std::shared_ptr<httplib::Client> createRequestClient() const {
+    const std::string base = normalizeBaseUrl(options_.baseUrl);
+    try {
+      std::shared_ptr<httplib::Client> client;
+#if TUGMCP_TLS_ENABLED
+      const std::string scheme = schemeOf(base);
+      if (scheme == "https") {
+        if (!options_.tls.certChainPath.empty() &&
+            !options_.tls.privateKeyPath.empty()) {
+          client = std::make_shared<httplib::Client>(
+              base, options_.tls.certChainPath, options_.tls.privateKeyPath);
+        } else {
+          client = std::make_shared<httplib::Client>(base);
+        }
+        if (!options_.tls.caBundlePath.empty()) {
+          client->set_ca_cert_path(options_.tls.caBundlePath);
+        }
+        client->enable_server_certificate_verification(options_.tls.verifyPeer);
+        client->enable_server_hostname_verification(options_.tls.verifyPeer);
+      } else {
+        client = std::make_shared<httplib::Client>(base);
+      }
+#else
+      client = std::make_shared<httplib::Client>(base);
+#endif
+      if (!client || !client->is_valid()) {
+        return nullptr;
+      }
+      client->set_connection_timeout(options_.requestTimeout);
+      client->set_read_timeout(options_.requestTimeout);
+      client->set_write_timeout(options_.requestTimeout);
+      return client;
+    } catch (...) {
+      return nullptr;
+    }
+  }
 
-    httplib::Client* client = nullptr;
+  void unregisterClient(const std::shared_ptr<httplib::Client>& client) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    for (auto it = active_clients_.begin(); it != active_clients_.end();) {
+      auto locked = it->lock();
+      if (!locked || locked == client) {
+        it = active_clients_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  Status send(const Json& message) override {
+    std::shared_ptr<httplib::Client> client = createRequestClient();
+    if (!client) {
+      return Status::failure(
+          reasonError("failed to create http client", "network_error"));
+    }
+
     {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       if (closed_) {
         return Status::failure(
             reasonError("transport is closed", "network_error"));
       }
-      if (!started_ || !client_) {
+      if (!started_) {
         return Status::failure(
             reasonError("transport is not started", "network_error"));
       }
-      client = client_.get();
+      active_clients_.push_back(client);
     }
+    struct ActiveGuard {
+      HttpClientTransport* owner;
+      std::shared_ptr<httplib::Client> client;
+      ~ActiveGuard() { owner->unregisterClient(client); }
+    } active_guard{this, client};
 
     httplib::Headers headers;
     headers.emplace("Accept", "application/json, text/event-stream");
@@ -398,20 +456,17 @@ public:
             return parser.feed(data, length);
           });
     } catch (...) {
-      send_lock.unlock();
       reportError(reasonError("http client threw", "network_error"));
       return Status::failure(
           reasonError("http client threw", "network_error"));
     }
 
     if (parser.error().has_value()) {
-      send_lock.unlock();
       reportError(*parser.error());
       return Status::failure(*parser.error());
     }
 
     if (!result) {
-      send_lock.unlock();
       const bool tls_failure = isTlsError(result.error());
       const char* reason = tls_failure ? "tls_handshake_failed" : "network_error";
       const char* error_message =
@@ -421,7 +476,6 @@ public:
     }
 
     const int status = result->status;
-    send_lock.unlock();
 
     if (status < 200 || status >= 300) {
       reportError(McpError::make(
@@ -456,12 +510,21 @@ public:
   }
 
   void cancelPending(const RequestId&) override {
-    // Do not take send_mutex_: the blocked sender owns it. cpp-httplib's
-    // stop() is thread-safe and aborts the in-flight socket operation.
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (client_) {
+    std::vector<std::shared_ptr<httplib::Client>> clients;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      if (client_) {
+        clients.push_back(client_);
+      }
+      for (const auto& weak : active_clients_) {
+        if (auto client = weak.lock()) {
+          clients.push_back(std::move(client));
+        }
+      }
+    }
+    for (const auto& client : clients) {
       try {
-        client_->stop();
+        client->stop();
       } catch (...) {
       }
     }
@@ -483,17 +546,29 @@ public:
   }
 
   void close() noexcept {
+    std::vector<std::shared_ptr<httplib::Client>> clients;
     {
-      std::lock_guard<std::mutex> send_lock(send_mutex_);
+      // A blocking send may own an in-flight request for the lifetime of an
+      // SSE stream. Each sender keeps its shared client alive; close only
+      // aborts them and never waits for the sender.
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       closed_ = true;
       started_ = false;
       if (client_) {
-        try {
-          client_->stop();
-        } catch (...) {
-        }
+        clients.push_back(std::move(client_));
         client_.reset();
+      }
+      for (const auto& weak : active_clients_) {
+        if (auto client = weak.lock()) {
+          clients.push_back(std::move(client));
+        }
+      }
+      active_clients_.clear();
+    }
+    for (const auto& client : clients) {
+      try {
+        client->stop();
+      } catch (...) {
       }
     }
 
@@ -554,14 +629,14 @@ private:
   }
 
   StreamableHttpClientOptions options_;
-  std::unique_ptr<httplib::Client> client_;
+  std::shared_ptr<httplib::Client> client_;
 
   std::mutex lifecycle_mutex_;
   bool started_ = false;
   bool closed_ = false;
   std::atomic<bool> close_notified_{false};
 
-  std::mutex send_mutex_;
+  std::vector<std::weak_ptr<httplib::Client>> active_clients_;
 
   std::mutex callback_mutex_;
   std::function<void(Json)> on_message_;

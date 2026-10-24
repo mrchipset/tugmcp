@@ -122,5 +122,12 @@ struct Page {
 
 enum class ListKind { Tools, Prompts, Resources };
 
+using SubscriptionId = std::string;
+
+struct SubscriptionFilter {
+  std::vector<ListKind> listChanged;
+  std::vector<std::string> resources;
+};
+
 } // namespace v1
 } // namespace mcp

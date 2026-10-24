@@ -1,11 +1,15 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <tugmcp/executor.hpp>
 #include <tugmcp/prompt.hpp>
@@ -53,10 +57,27 @@ public:
   // Thread-safe and idempotent.
   void stop() noexcept;
 
+  // Push notifications to matching 2026 subscriptions. Failures remove the
+  // affected subscription; these methods never hold the registry lock while
+  // calling into the transport.
+  void notifyResourceUpdated(std::string_view uri);
+  void notifyListChanged(ListKind kind);
+
   // Last transport/protocol error observed while running (test aid).
   std::optional<McpError> lastError() const;
 
 private:
+  struct SubscriptionState {
+    SubscriptionId id;
+    std::string route;
+    std::vector<ListKind> listChanged;
+    std::unordered_set<std::string> resources;
+    std::string protocolVersion;
+  };
+
+  void removeSubscription(const SubscriptionId& id);
+  void clearSubscriptions() noexcept;
+
   // transport_ is declared first so it is destroyed last.
   std::shared_ptr<ITransport> transport_;
   ServerOptions options_;
@@ -68,6 +89,10 @@ private:
   std::optional<McpError> last_error_;
   std::unordered_map<RequestId, std::shared_ptr<CancellationToken>>
       cancellation_tokens_;
+
+  std::mutex subscriptions_mutex_;
+  std::unordered_map<SubscriptionId, SubscriptionState> subscriptions_;
+  std::atomic<std::uint64_t> next_subscription_id_{1};
 };
 
 } // namespace v1

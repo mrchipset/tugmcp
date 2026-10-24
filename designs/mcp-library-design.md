@@ -824,6 +824,11 @@ public:
 - **MRTR**：handler 返回 `OperationOutcome<T>` 的 `InputRequired`（`inputRequests`/`requestState` 至少一个）；adapter 输出 `resultType=input_required`。**重试是客户端发起的新请求**：客户端选择新的 JSON-RPC id，原样回传 `requestState`，并带 `inputResponses`；服务端不得指定新 id。适用于 `tools/call`、`resources/read`、`prompts/get`（`ToolOutcome`/`ResourceOutcome`/`PromptOutcome`）。
 - **MRTR 校验**：adapter 校验 `requestState` 完整性/轮次/过期；缺失 `inputResponses` 或状态被篡改 → `-32602`/tool error；多轮按 `requestState` 继续。**P2b 实现边界**：库只做结构性校验（`requestState` 与 `inputResponses` 成对、类型正确、原样回传）；`requestState` 的完整性/签名/轮次由应用自行编码与校验（D10 安全边界）。
 - **订阅**：客户端用 `SubscriptionFilter`（list_changed + `resourceSubscriptions`）；2026 `subscriptions/listen` 先回 `notifications/subscriptions/acknowledged`（带 `subscriptionId`），再做过滤协商；不支持的类型省略或拒绝，不接受任意事件类型。2025 用对应资源订阅/通知。
+  - **P2b wire 形状**（本节为权威）：请求 `subscriptions/listen` 的 params 为
+    `{"subscriptions":{"listChanged":["tools"|"prompts"|"resources"],"resources":["<uri>"]}}`，两个数组都可省略；未知 `listChanged` 值 → `-32602`。
+  - 响应是 SSE 流：首个事件 `notifications/subscriptions/acknowledged`，params `{"subscriptionId":"s1","requestId":<原请求 id>}`；之后每个事件都带同一个 `subscriptionId` 便于客户端在共享连接上路由。
+  - 通知：`notifications/resources/updated`（params 含 `uri` + `subscriptionId`）、`notifications/{tools,prompts,resources}/list_changed`（params 含 `subscriptionId`）。流不发送最终 JSON-RPC 响应；连接关闭即订阅结束。
+  - 2025 对 `subscriptions/listen` 返回 `-32601`；stdio 等非流式传输返回 `-32603` + `data.reason="subscriptions_require_stream"`。
 - **服务端推送 hooks**：`notifyResourceUpdated(uri)`/`notifyListChanged(kind)` 只向已订阅者投递；`SseSink::send(..., eventId)` 用于 2025 per-stream replay；2026 显式关闭，不依赖 Last-Event-ID。
 - **2025 server→client 请求**：adapter 通过 `ClientEventSink::onRequest(request, responder)` 交给客户端；`setRequestHandler("roots/list"/"sampling/createMessage"/"elicitation/create")`；按 `ClientCapabilities` gate；未注册返回 method-not-found。2026 不发起该路径，改用 MRTR `input_required`。
 - **取消**：每个 `RequestContext` 带 `CancellationToken`；`cancel(RequestId, CancelMode)`：`Auto`/`CloseStream`（2026 HTTP 关闭该 SSE response）/`Notification`（2025 按规范）。本地 timeout 同时取消 pending 与 handler。

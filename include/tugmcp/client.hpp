@@ -66,6 +66,10 @@ public:
   Result<Json> getPrompt(std::string_view name,
                          Json arguments = Json::object(),
                          const CallOptions& options = {});
+  Result<SubscriptionId> subscribe(
+      const SubscriptionFilter& filter,
+      std::function<void(const Json&)> onNotification);
+  Status unsubscribe(const SubscriptionId& id);
   Status cancel(const RequestId& id, CancelMode mode = CancelMode::Auto);
   void close() noexcept;
 

@@ -1,5 +1,6 @@
 #include "tugmcp/server.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -15,6 +16,96 @@
 
 namespace mcp {
 namespace v1 {
+namespace {
+
+const char* listKindName(ListKind kind) {
+  switch (kind) {
+  case ListKind::Tools:
+    return "tools";
+  case ListKind::Prompts:
+    return "prompts";
+  case ListKind::Resources:
+    return "resources";
+  }
+  return "tools";
+}
+
+const char* listChangedMethod(ListKind kind) {
+  switch (kind) {
+  case ListKind::Tools:
+    return "notifications/tools/list_changed";
+  case ListKind::Prompts:
+    return "notifications/prompts/list_changed";
+  case ListKind::Resources:
+    return "notifications/resources/list_changed";
+  }
+  return "notifications/tools/list_changed";
+}
+
+Result<SubscriptionFilter> parseSubscriptionFilter(const Json& params) {
+  SubscriptionFilter filter;
+  if (params.is_null()) {
+    return filter;
+  }
+  if (!params.is_object()) {
+    return Result<SubscriptionFilter>::failure(McpError::make(
+        ErrorCode::InvalidParams, "subscriptions/listen params must be an object"));
+  }
+  if (!params.contains("subscriptions")) {
+    return filter;
+  }
+  const Json& subscriptions = params.at("subscriptions");
+  if (!subscriptions.is_object()) {
+    return Result<SubscriptionFilter>::failure(McpError::make(
+        ErrorCode::InvalidParams, "subscriptions must be an object"));
+  }
+
+  if (subscriptions.contains("listChanged")) {
+    const Json& list_changed = subscriptions.at("listChanged");
+    if (!list_changed.is_array()) {
+      return Result<SubscriptionFilter>::failure(McpError::make(
+          ErrorCode::InvalidParams, "listChanged must be an array"));
+    }
+    for (const auto& item : list_changed) {
+      if (!item.is_string()) {
+        return Result<SubscriptionFilter>::failure(McpError::make(
+            ErrorCode::InvalidParams,
+            "listChanged values must be strings"));
+      }
+      const std::string value = item.get<std::string>();
+      if (value == "tools") {
+        filter.listChanged.push_back(ListKind::Tools);
+      } else if (value == "prompts") {
+        filter.listChanged.push_back(ListKind::Prompts);
+      } else if (value == "resources") {
+        filter.listChanged.push_back(ListKind::Resources);
+      } else {
+        return Result<SubscriptionFilter>::failure(McpError::make(
+            ErrorCode::InvalidParams,
+            "invalid listChanged value: " + value));
+      }
+    }
+  }
+
+  if (subscriptions.contains("resources")) {
+    const Json& resources = subscriptions.at("resources");
+    if (!resources.is_array()) {
+      return Result<SubscriptionFilter>::failure(McpError::make(
+          ErrorCode::InvalidParams, "resources must be an array"));
+    }
+    for (const auto& item : resources) {
+      if (!item.is_string()) {
+        return Result<SubscriptionFilter>::failure(McpError::make(
+            ErrorCode::InvalidParams, "resources values must be strings"));
+      }
+      filter.resources.push_back(item.get<std::string>());
+    }
+  }
+
+  return filter;
+}
+
+} // namespace
 
 McpServer::McpServer(ServerOptions options,
                      std::shared_ptr<ITransport> transport)
@@ -87,6 +178,7 @@ Status McpServer::run() {
       cancellation_tokens_.clear();
     } catch (...) {
     }
+    clearSubscriptions();
   };
 
   struct CleanupGuard {
@@ -164,6 +256,92 @@ Status McpServer::run() {
           } catch (...) {
             record_error(McpError::make(ErrorCode::InternalError,
                                         "failed to decode message"));
+            return;
+          }
+
+          if (message.method == "subscriptions/listen") {
+            if (message.kind != MessageKind::Request) {
+              return;
+            }
+
+            auto send_listen_error =
+                [&](ErrorCode code, std::string text,
+                    std::optional<std::string> reason) {
+                  Message response;
+                  response.kind = MessageKind::Response;
+                  response.jsonrpc = "2.0";
+                  response.id = message.id;
+                  response.error = reason.has_value()
+                                       ? McpError::make(
+                                             code, std::move(text),
+                                             Json{{"reason", *reason}})
+                                       : McpError::make(code, std::move(text));
+                  send_response(metadata.route, response);
+                };
+
+            if (metadata.protocolVersion != "2026-07-28") {
+              send_listen_error(ErrorCode::MethodNotFound,
+                                "subscriptions/listen requires 2026-07-28",
+                                std::nullopt);
+              return;
+            }
+            if (metadata.route.empty()) {
+              send_listen_error(
+                  ErrorCode::InternalError,
+                  "subscriptions require a streaming transport",
+                  std::string("subscriptions_require_stream"));
+              return;
+            }
+
+            auto filter = parseSubscriptionFilter(message.params);
+            if (!filter.hasValue()) {
+              send_listen_error(ErrorCode::InvalidParams,
+                                filter.error().message, std::nullopt);
+              return;
+            }
+
+            const std::uint64_t serial =
+                next_subscription_id_.fetch_add(1, std::memory_order_relaxed);
+            const SubscriptionId subscription_id =
+                "s" + std::to_string(serial);
+
+            SubscriptionState state;
+            state.id = subscription_id;
+            state.route = metadata.route;
+            state.listChanged = filter.value().listChanged;
+            state.resources.insert(filter.value().resources.begin(),
+                                   filter.value().resources.end());
+            state.protocolVersion = metadata.protocolVersion;
+            {
+              std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+              subscriptions_.emplace(subscription_id, std::move(state));
+            }
+
+            Json ack;
+            ack["jsonrpc"] = "2.0";
+            ack["method"] =
+                "notifications/subscriptions/acknowledged";
+            ack["params"] =
+                Json{{"subscriptionId", subscription_id},
+                     {"requestId", message.id.toJson()}};
+
+            bool sent_ok = false;
+            try {
+              sent_ok =
+                  transport_->sendTo(metadata.route, ack).ok;
+            } catch (const std::exception& error) {
+              record_error(McpError::make(
+                  ErrorCode::InternalError,
+                  std::string("failed to send subscription ack: ") +
+                      error.what()));
+            } catch (...) {
+              record_error(McpError::make(
+                  ErrorCode::InternalError,
+                  "failed to send subscription ack"));
+            }
+            if (!sent_ok) {
+              removeSubscription(subscription_id);
+            }
             return;
           }
 
@@ -325,12 +503,98 @@ void McpServer::stop() noexcept {
   for (const auto& token : tokens) {
     token->cancel();
   }
+  clearSubscriptions();
   cv_.notify_all();
 }
 
 std::optional<McpError> McpServer::lastError() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return last_error_;
+}
+
+void McpServer::removeSubscription(const SubscriptionId& id) {
+  std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+  subscriptions_.erase(id);
+}
+
+void McpServer::clearSubscriptions() noexcept {
+  try {
+    std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+    subscriptions_.clear();
+  } catch (...) {
+  }
+}
+
+void McpServer::notifyResourceUpdated(std::string_view uri) {
+  std::vector<SubscriptionState> matches;
+  {
+    std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+    matches.reserve(subscriptions_.size());
+    for (const auto& item : subscriptions_) {
+      if (item.second.resources.count(std::string(uri)) != 0) {
+        matches.push_back(item.second);
+      }
+    }
+  }
+
+  for (const auto& subscription : matches) {
+    Json notification;
+    notification["jsonrpc"] = "2.0";
+    notification["method"] = "notifications/resources/updated";
+    notification["params"] =
+        Json{{"uri", std::string(uri)},
+             {"subscriptionId", subscription.id}};
+
+    Status sent = Status::failure(McpError::make(
+        ErrorCode::InternalError, "subscription route unavailable"));
+    try {
+      sent = transport_->sendTo(subscription.route, notification);
+    } catch (...) {
+    }
+    if (!sent) {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_error_ = sent.error;
+      }
+      removeSubscription(subscription.id);
+    }
+  }
+}
+
+void McpServer::notifyListChanged(ListKind kind) {
+  std::vector<SubscriptionState> matches;
+  {
+    std::lock_guard<std::mutex> lock(subscriptions_mutex_);
+    matches.reserve(subscriptions_.size());
+    for (const auto& item : subscriptions_) {
+      const auto& kinds = item.second.listChanged;
+      if (std::find(kinds.begin(), kinds.end(), kind) != kinds.end()) {
+        matches.push_back(item.second);
+      }
+    }
+  }
+
+  const std::string method = listChangedMethod(kind);
+  for (const auto& subscription : matches) {
+    Json notification;
+    notification["jsonrpc"] = "2.0";
+    notification["method"] = method;
+    notification["params"] = Json{{"subscriptionId", subscription.id}};
+
+    Status sent = Status::failure(McpError::make(
+        ErrorCode::InternalError, "subscription route unavailable"));
+    try {
+      sent = transport_->sendTo(subscription.route, notification);
+    } catch (...) {
+    }
+    if (!sent) {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_error_ = sent.error;
+      }
+      removeSubscription(subscription.id);
+    }
+  }
 }
 
 } // namespace v1
