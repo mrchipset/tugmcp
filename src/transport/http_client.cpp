@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -75,7 +76,10 @@ bool isTlsError(httplib::Error error) {
 // accumulated event. Unknown fields (including `event:`) are ignored.
 class ResponseStreamParser {
 public:
-  explicit ResponseStreamParser(std::function<void(Json)> dispatch)
+  using EventCallback =
+      std::function<void(Json, std::uint64_t last_event_id)>;
+
+  explicit ResponseStreamParser(EventCallback dispatch)
       : dispatch_(std::move(dispatch)) {}
 
   bool feed(const char* data, std::size_t length) {
@@ -175,7 +179,22 @@ private:
       }
     }
 
-    if (field == "data") {
+    if (field == "id") {
+      bool valid = !value.empty();
+      std::uint64_t parsed = 0;
+      for (const char character : value) {
+        if (character < '0' || character > '9') {
+          valid = false;
+          break;
+        }
+        parsed = parsed * 10 +
+                 static_cast<std::uint64_t>(character - '0');
+      }
+      if (valid) {
+        last_event_id_ = parsed;
+        has_event_id_ = true;
+      }
+    } else if (field == "data") {
       if (has_data_) {
         data_.push_back('\n');
       }
@@ -201,12 +220,14 @@ private:
       error_ = parsed.error();
       return false;
     }
-    dispatch_(std::move(parsed.value()));
+    dispatch_(std::move(parsed.value()), last_event_id_);
     dispatched_ = true;
     return true;
   }
 
-  std::function<void(Json)> dispatch_;
+  EventCallback dispatch_;
+  std::uint64_t last_event_id_ = 0;
+  bool has_event_id_ = false;
   bool decided_ = false;
   bool json_mode_ = false;
   bool dispatched_ = false;
@@ -439,6 +460,16 @@ public:
     httplib::Headers headers;
     headers.emplace("Accept", "application/json, text/event-stream");
     headers.emplace("MCP-Protocol-Version", options_.protocolVersion);
+    if (options_.protocolVersion == "2025-11-25") {
+      std::string session;
+      {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        session = session_id_;
+      }
+      if (!session.empty()) {
+        headers.emplace("MCP-Session-Id", session);
+      }
+    }
 
     if (options_.protocolVersion == "2026-07-28" &&
         message.contains("method") && message.at("method").is_string()) {
@@ -483,7 +514,9 @@ public:
     }
 
     ResponseStreamParser parser(
-        [this](Json parsed) { invokeMessage(std::move(parsed)); });
+        [this](Json parsed, std::uint64_t) {
+          invokeMessage(std::move(parsed));
+        });
 
     httplib::Result result;
     try {
@@ -513,6 +546,16 @@ public:
     }
 
     const int status = result->status;
+    if (status >= 200 && status < 300) {
+      const std::string session =
+          result->get_header_value("MCP-Session-Id");
+      if (!session.empty()) {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (!closed_) {
+          session_id_ = session;
+        }
+      }
+    }
 
     if (status < 200 || status >= 300) {
       reportError(McpError::make(
@@ -584,16 +627,75 @@ public:
     on_close_ = std::move(handler);
   }
 
+  bool supportsServerStream() const override { return true; }
+
+  std::string sessionId() const override {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return session_id_;
+  }
+
+  Status openStream() override {
+    std::string session;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      if (closed_) {
+        return Status::failure(
+            reasonError("transport is closed", "network_error"));
+      }
+      session = session_id_;
+    }
+    if (session.empty()) {
+      return Status::failure(McpError::make(
+          ErrorCode::InternalError, "missing session id",
+          Json{{"reason", "missing_session"}}));
+    }
+    {
+      std::lock_guard<std::mutex> lock(stream_control_mutex_);
+      if (stream_thread_.joinable()) {
+        return Status::success();
+      }
+      stream_stop_.store(false, std::memory_order_release);
+      stream_thread_ = std::thread([this, session] { streamLoop(session); });
+    }
+    return Status::success();
+  }
+
+  void closeStream() override {
+    stream_stop_.store(true, std::memory_order_release);
+    std::shared_ptr<httplib::Client> client;
+    {
+      std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+      client = stream_client_;
+    }
+    if (client) {
+      try {
+        client->stop();
+      } catch (...) {
+      }
+    }
+    std::thread thread;
+    {
+      std::lock_guard<std::mutex> lock(stream_control_mutex_);
+      if (stream_thread_.joinable() &&
+          stream_thread_.get_id() != std::this_thread::get_id()) {
+        thread = std::move(stream_thread_);
+      }
+    }
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+
   void close() noexcept {
+    closeStream();
     std::vector<std::shared_ptr<httplib::Client>> clients;
     {
-      // A blocking send may own an in-flight request for the lifetime of an
-      // SSE stream. Each sender keeps its shared client alive; close only
-      // aborts them and never waits for the sender.
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       closed_ = true;
       started_ = false;
       cancelled_before_send_.clear();
+      session_id_.clear();
+      last_event_id_.store(0);
       if (client_) {
         clients.push_back(std::move(client_));
         client_.reset();
@@ -613,6 +715,89 @@ public:
     }
 
     notifyClose();
+  }
+
+private:
+  void streamLoop(std::string session) {
+    std::uint64_t last_event = last_event_id_.load();
+    std::chrono::milliseconds backoff{100};
+    while (!stream_stop_.load(std::memory_order_acquire)) {
+      auto client = createRequestClient();
+      if (!client) {
+        waitForStop(backoff);
+        backoff = nextBackoff(backoff);
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (closed_ || stream_stop_.load(std::memory_order_acquire)) {
+          break;
+        }
+        stream_client_ = client;
+      }
+
+      httplib::Headers headers;
+      headers.emplace("Accept", "text/event-stream");
+      headers.emplace("MCP-Protocol-Version", "2025-11-25");
+      headers.emplace("MCP-Session-Id", session);
+      if (last_event > 0) {
+        headers.emplace("Last-Event-ID", std::to_string(last_event));
+      }
+
+      ResponseStreamParser parser(
+          [this, &last_event](Json message, std::uint64_t event_id) {
+            if (event_id > 0) {
+              last_event = event_id;
+              last_event_id_.store(event_id);
+            }
+            invokeMessage(std::move(message));
+          });
+
+      httplib::Result result;
+      try {
+        result = client->Get(
+            "/mcp", headers,
+            [&parser](const char* data, std::size_t length) {
+              return parser.feed(data, length);
+            });
+      } catch (...) {
+        result = httplib::Result(nullptr, httplib::Error::Connection);
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (stream_client_ == client) {
+          stream_client_.reset();
+        }
+      }
+      if (stream_stop_.load(std::memory_order_acquire)) {
+        break;
+      }
+      if (result && result->status == 200) {
+        backoff = std::chrono::milliseconds(100);
+      }
+      waitForStop(backoff);
+      backoff = nextBackoff(backoff);
+    }
+  }
+
+  static std::chrono::milliseconds nextBackoff(
+      std::chrono::milliseconds current) {
+    if (current < std::chrono::milliseconds(250)) {
+      return std::chrono::milliseconds(250);
+    }
+    if (current < std::chrono::milliseconds(1000)) {
+      return std::chrono::milliseconds(1000);
+    }
+    return std::chrono::milliseconds(1000);
+  }
+
+  void waitForStop(std::chrono::milliseconds duration) const {
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    while (!stream_stop_.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
   }
 
 private:
@@ -671,10 +856,17 @@ private:
   StreamableHttpClientOptions options_;
   std::shared_ptr<httplib::Client> client_;
 
-  std::mutex lifecycle_mutex_;
+  mutable std::mutex lifecycle_mutex_;
   bool started_ = false;
   bool closed_ = false;
+  std::string session_id_;
+  std::shared_ptr<httplib::Client> stream_client_;
   std::atomic<bool> close_notified_{false};
+  std::atomic<std::uint64_t> last_event_id_{0};
+
+  std::mutex stream_control_mutex_;
+  std::thread stream_thread_;
+  std::atomic<bool> stream_stop_{false};
 
   std::vector<std::weak_ptr<httplib::Client>> active_clients_;
   std::unordered_map<RequestId, std::weak_ptr<httplib::Client>,

@@ -152,7 +152,7 @@ public:
   Status initialize() {
     Json params;
     params["protocolVersion"] = "2025-11-25";
-    params["capabilities"] = Json::object();
+    params["capabilities"] = options_.capabilities;
     params["clientInfo"] =
         Json{{"name", options_.name}, {"version", options_.version}};
 
@@ -173,6 +173,19 @@ public:
     } catch (...) {
       return Status::failure(
           failureWithReason("failed to send initialized", "send_failed"));
+    }
+
+    if (options_.autoOpenStream && transport_->supportsServerStream()) {
+      Status opened = transport_->openStream();
+      if (!opened) {
+        const bool unsupported =
+            opened.error.data.is_object() &&
+            opened.error.data.contains("reason") &&
+            opened.error.data.at("reason") == "stream_not_supported";
+        if (!unsupported) {
+          return opened;
+        }
+      }
     }
 
     return Status::success();
@@ -380,6 +393,9 @@ public:
 
     if (cancelled) {
       cancelTransport(request_id);
+      if (options_.protocolVersion == "2025-11-25") {
+        sendCancellationNotification(request_id);
+      }
       parkSender(sender);
       return Result<Json>::failure(
           failureWithReason("request cancelled", "cancelled"));
@@ -578,6 +594,24 @@ public:
     return Status::success();
   }
 
+  void sendCancellationNotification(const RequestId& id) noexcept {
+    if (!transport_) {
+      return;
+    }
+    Json notification;
+    notification["jsonrpc"] = "2.0";
+    notification["method"] = "notifications/cancelled";
+    notification["params"] =
+        Json{{"requestId", id.toJson()}, {"reason", "cancelled"}};
+    try {
+      Status sent = transport_->send(notification);
+      if (!sent) {
+        handleError(sent.error);
+      }
+    } catch (...) {
+    }
+  }
+
   Status cancel(const RequestId& id, CancelMode mode) {
     std::shared_ptr<PendingRequest> pending;
     {
@@ -610,9 +644,47 @@ public:
     if (close_stream) {
       cancelTransport(id);
     }
+    if (mode == CancelMode::Notification ||
+        (mode == CancelMode::Auto &&
+         options_.protocolVersion == "2025-11-25")) {
+      sendCancellationNotification(id);
+    }
     return Status::success();
   }
 
+  std::string sessionId() const {
+    return transport_ ? transport_->sessionId() : std::string{};
+  }
+
+  Status openStream() {
+    if (!transport_) {
+      return Status::failure(
+          failureWithReason("transport is null", "transport_closed"));
+    }
+    return transport_->openStream();
+  }
+
+  void closeStream() {
+    if (transport_) {
+      transport_->closeStream();
+    }
+  }
+
+  void setRequestHandler(
+      std::string method,
+      std::function<Result<Json>(const Json&)> handler) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (handler) {
+      request_handlers_[std::move(method)] = std::move(handler);
+    } else {
+      request_handlers_.erase(method);
+    }
+  }
+
+  void setOnNotification(std::function<void(const Json&)> handler) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    on_notification_ = std::move(handler);
+  }
   void close() noexcept {
     std::vector<std::pair<RequestId, std::shared_ptr<PendingRequest>>> entries;
     std::vector<std::shared_ptr<SubscriptionHandshake>> handshakes;
@@ -682,6 +754,16 @@ public:
         transport_->cancelPending(id);
       } catch (...) {
       }
+    }
+
+    try {
+      transport_->closeStream();
+    } catch (...) {
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      request_handlers_.clear();
+      on_notification_ = nullptr;
     }
 
     reapBackgroundSenders();
@@ -776,6 +858,51 @@ private:
     }
   }
 
+  void handleClientRequest(const Message& request) noexcept {
+    try {
+      std::function<Result<Json>(const Json&)> handler;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = request_handlers_.find(request.method);
+        if (it != request_handlers_.end()) {
+          handler = it->second;
+        }
+      }
+
+      Result<Json> result = Result<Json>::failure(McpError::make(
+          ErrorCode::MethodNotFound,
+          "method not found: " + request.method));
+      if (handler) {
+        try {
+          result = handler(request.params);
+        } catch (const std::exception& error) {
+          result = Result<Json>::failure(McpError::make(
+              ErrorCode::InternalError,
+              std::string("request handler failed: ") + error.what()));
+        } catch (...) {
+          result = Result<Json>::failure(McpError::make(
+              ErrorCode::InternalError, "request handler failed"));
+        }
+      }
+
+      Json response;
+      response["jsonrpc"] = "2.0";
+      response["id"] = request.id.toJson();
+      if (result.hasValue()) {
+        response["result"] = result.value();
+      } else {
+        response["error"] = errorToJson(result.error());
+      }
+      if (transport_) {
+        Status sent = transport_->send(response);
+        if (!sent) {
+          handleError(sent.error);
+        }
+      }
+    } catch (...) {
+    }
+  }
+
   void handleMessage(Json message) noexcept {
     try {
       auto decoded = decode(message);
@@ -787,6 +914,10 @@ private:
       Message& decoded_message = decoded.value();
       if (decoded_message.kind == MessageKind::Notification) {
         handleNotification(decoded_message, message);
+        return;
+      }
+      if (decoded_message.kind == MessageKind::Request) {
+        handleClientRequest(decoded_message);
         return;
       }
       if (decoded_message.kind != MessageKind::Response) {
@@ -922,69 +1053,74 @@ private:
             notification.params.at("subscriptionId").get<SubscriptionId>());
         return;
       }
-      if (!notification.params.is_object()) {
-        return;
-      }
       const Json& params = notification.params;
-      if (!params.contains("progressToken")) {
-        return;
-      }
-      auto token = progressTokenFromJson(params.at("progressToken"));
-      if (!token.hasValue()) {
-        return;
-      }
-
-      std::shared_ptr<PendingRequest> pending;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& item : pending_) {
-          if (item.second->progress_token.has_value() &&
-              *item.second->progress_token == token.value()) {
-            pending = item.second;
-            break;
+      if (params.is_object() && params.contains("progressToken")) {
+        auto token = progressTokenFromJson(params.at("progressToken"));
+        if (token.hasValue()) {
+          std::shared_ptr<PendingRequest> pending;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& item : pending_) {
+              if (item.second->progress_token.has_value() &&
+                  *item.second->progress_token == token.value()) {
+                pending = item.second;
+                break;
+              }
+            }
+          }
+          if (pending) {
+            if (notification.method == "notifications/progress") {
+              std::function<void(const Progress&)> callback;
+              {
+                std::lock_guard<std::mutex> pending_lock(pending->mutex);
+                callback = pending->on_progress;
+              }
+              if (callback) {
+                Progress progress;
+                progress.token = token.value();
+                progress.progress = params.value("progress", 0.0);
+                if (params.contains("total") &&
+                    params.at("total").is_number()) {
+                  progress.total = params.at("total").get<double>();
+                }
+                if (params.contains("message") &&
+                    params.at("message").is_string()) {
+                  progress.message =
+                      params.at("message").get<std::string>();
+                }
+                try {
+                  callback(progress);
+                } catch (...) {
+                }
+              }
+            } else {
+              std::function<void(const Json&)> callback;
+              {
+                std::lock_guard<std::mutex> pending_lock(pending->mutex);
+                callback = pending->on_notification;
+              }
+              if (callback) {
+                try {
+                  callback(raw);
+                } catch (...) {
+                }
+              }
+            }
+            return;
           }
         }
       }
-      if (!pending) {
-        return;
-      }
 
-      if (notification.method == "notifications/progress") {
-        std::function<void(const Progress&)> callback;
-        {
-          std::lock_guard<std::mutex> pending_lock(pending->mutex);
-          callback = pending->on_progress;
-        }
-        if (!callback) {
-          return;
-        }
-        Progress progress;
-        progress.token = token.value();
-        progress.progress = params.value("progress", 0.0);
-        if (params.contains("total") && params.at("total").is_number()) {
-          progress.total = params.at("total").get<double>();
-        }
-        if (params.contains("message") && params.at("message").is_string()) {
-          progress.message = params.at("message").get<std::string>();
-        }
+      std::function<void(const Json&)> global_callback;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        global_callback = on_notification_;
+      }
+      if (global_callback) {
         try {
-          callback(progress);
+          global_callback(raw);
         } catch (...) {
         }
-        return;
-      }
-
-      std::function<void(const Json&)> callback;
-      {
-        std::lock_guard<std::mutex> pending_lock(pending->mutex);
-        callback = pending->on_notification;
-      }
-      if (!callback) {
-        return;
-      }
-      try {
-        callback(raw);
-      } catch (...) {
       }
     } catch (...) {
     }
@@ -1071,6 +1207,11 @@ private:
 
   std::mutex subscription_senders_mutex_;
   std::vector<std::thread> subscription_senders_;
+
+  std::unordered_map<std::string,
+                     std::function<Result<Json>(const Json&)>>
+      request_handlers_;
+  std::function<void(const Json&)> on_notification_;
 };
 
 McpClient::McpClient(ClientOptions options,
@@ -1151,6 +1292,35 @@ Result<Json> McpClient::getPrompt(std::string_view name, Json arguments,
   return call("prompts/get", std::move(params), options);
 }
 
+std::string McpClient::sessionId() const {
+  return impl_ ? impl_->sessionId() : std::string{};
+}
+
+Status McpClient::openStream() {
+  return impl_ ? impl_->openStream()
+               : Status::failure(McpError::make(
+                     ErrorCode::InternalError, "client is closed"));
+}
+
+void McpClient::closeStream() {
+  if (impl_) {
+    impl_->closeStream();
+  }
+}
+
+void McpClient::setRequestHandler(
+    std::string method, std::function<Result<Json>(const Json&)> handler) {
+  if (impl_) {
+    impl_->setRequestHandler(std::move(method), std::move(handler));
+  }
+}
+
+void McpClient::setOnNotification(
+    std::function<void(const Json&)> handler) {
+  if (impl_) {
+    impl_->setOnNotification(std::move(handler));
+  }
+}
 Result<SubscriptionId> McpClient::subscribe(
     const SubscriptionFilter& filter,
     std::function<void(const Json&)> onNotification) {

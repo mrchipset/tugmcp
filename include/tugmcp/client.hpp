@@ -25,6 +25,10 @@ struct ClientOptions {
   std::uint32_t timeoutMs = 30000;
   std::string protocolVersion = "2026-07-28";
   bool allow2025Fallback = true;
+  bool autoOpenStream = true;
+  Json capabilities = Json{{"roots", Json::object()},
+                           {"sampling", Json::object()},
+                           {"elicitation", Json::object()}};
   std::shared_ptr<ITimeSource> timeSource;
 };
 
@@ -66,6 +70,12 @@ public:
   Result<Json> getPrompt(std::string_view name,
                          Json arguments = Json::object(),
                          const CallOptions& options = {});
+  std::string sessionId() const;
+  Status openStream();
+  void closeStream();
+  void setRequestHandler(std::string method,
+                          std::function<Result<Json>(const Json&)> handler);
+  void setOnNotification(std::function<void(const Json&)> handler);
   Result<SubscriptionId> subscribe(
       const SubscriptionFilter& filter,
       std::function<void(const Json&)> onNotification);

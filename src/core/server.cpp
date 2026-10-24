@@ -278,6 +278,31 @@ Status McpServer::run() {
               pending->cv.notify_all();
               return;
             }
+            if (decoded.value().kind == MessageKind::Notification &&
+                decoded.value().method == "notifications/cancelled" &&
+                decoded.value().params.is_object() &&
+                decoded.value().params.contains("requestId")) {
+              auto request_id =
+                  RequestId::fromJson(decoded.value().params.at("requestId"));
+              if (request_id.hasValue()) {
+                const std::string suffix = request_id.value().toJson().dump();
+                std::vector<std::shared_ptr<CancellationToken>> tokens;
+                {
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  for (const auto& item : cancellation_tokens_) {
+                    if (item.first.size() >= suffix.size() &&
+                        item.first.compare(item.first.size() - suffix.size(),
+                                           suffix.size(), suffix) == 0) {
+                      tokens.push_back(item.second);
+                    }
+                  }
+                }
+                for (const auto& token : tokens) {
+                  token->cancel();
+                }
+              }
+              return;
+            }
             message = std::move(decoded.value());
           } catch (const std::exception& error) {
             record_error(McpError::make(

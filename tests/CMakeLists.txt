@@ -84,7 +84,8 @@ if(TUGMCP_WITH_HTTP)
     integration/http_sse_test.cpp
     integration/client_2026_loopback_test.cpp
     integration/subscriptions_test.cpp
-    integration/http_session_test.cpp)
+    integration/http_session_test.cpp
+    integration/client_2025_loopback_test.cpp)
   target_link_libraries(tugmcp_integration_tests PRIVATE
     tugmcp::http tugmcp_3rd_httplib)
   if(TUGMCP_TLS)

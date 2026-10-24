@@ -807,6 +807,7 @@ public:
 - server→client 请求：库生成 JSON-RPC id，经该 session 的 GET 流发送并等待 POST 回来的响应；API 为 `Result<Json> requestClient(sessionId, method, params, timeout)`；无活跃 GET 流 → `data.reason="no_session_stream"`；超时 → `data.reason="timeout"`。
 - 主机通知：`Status sendNotification(sessionId, method, params)` 经 GET 流投递，用于 2025 `notifications/*` 与资源更新。
 - 2026 请求忽略 session 头，仍走 stateless 路径。
+- **客户端 2025**：transport 在 `initialize` 响应上捕获 `MCP-Session-Id` 并自动附加到后续请求；`connect()` 默认打开 GET 流（`ClientOptions::autoOpenStream`）；GET 流断线按 `Last-Event-ID` 重连（100ms→1s 退避）；server→client 请求由 `McpClient::setRequestHandler(method, handler)` 处理并回 POST；`setOnNotification` 接收流上的通知；`cancel(id, Notification)` 发送 `notifications/cancelled`（params 带原 request id），服务端据此取消对应 handler token。
 
 ### 13.3 关键映射
 

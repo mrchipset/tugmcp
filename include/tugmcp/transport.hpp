@@ -62,6 +62,16 @@ public:
   // Whether this transport can open per-request server streams (SSE).
   virtual bool supportsStreaming() const { return false; }
 
+  // Open the server-to-client stream for the active session (2025 GET SSE).
+  virtual Status openStream() {
+    return Status::failure(McpError::make(
+        ErrorCode::MethodNotFound, "stream not supported",
+        Json{{"reason", "stream_not_supported"}}));
+  }
+  virtual void closeStream() {}
+  virtual std::string sessionId() const { return {}; }
+  virtual bool supportsServerStream() const { return false; }
+
   // Optional notification that a transport route is gone. Single-route
   // transports may leave this unset.
   virtual void setOnRouteClosed(std::function<void(const std::string&)>) {}
