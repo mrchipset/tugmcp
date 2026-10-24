@@ -55,6 +55,7 @@ add_library(tugmcp_core STATIC
   src/core/registry.cpp
   src/core/dispatcher.cpp
   src/core/server.cpp
+  src/core/executor.cpp
   src/core/client.cpp
   src/transport/stdio.cpp)
 add_library(tugmcp::core ALIAS tugmcp_core)

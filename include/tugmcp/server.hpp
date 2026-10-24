@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include <tugmcp/executor.hpp>
 #include <tugmcp/schema.hpp>
 #include <tugmcp/time_source.hpp>
 #include <tugmcp/tool.hpp>
@@ -23,6 +24,11 @@ struct ServerOptions {
   // inputSchema, registration fails unless allowUnvalidatedTools is true.
   SchemaValidatorPtr schemaValidator;
   bool allowUnvalidatedTools = false;
+
+  // Production hosts should inject an executor. A null executor keeps the
+  // legacy synchronous dispatch path for compatibility (handlers then run on
+  // the transport thread).
+  std::shared_ptr<IExecutor> executor;
 };
 
 class McpServer {

@@ -47,41 +47,80 @@ Status McpServer::run() {
     transport_->setOnClose(nullptr);
   };
 
-  transport_->setOnMessage([this, &dispatcher, record_error](Json incoming) {
-    try {
-      auto decoded = decode(incoming);
-      if (!decoded.hasValue()) {
-        record_error(decoded.error());
-        return;
-      }
-      if (decoded.value().kind == MessageKind::Response) {
-        return;
-      }
+  const std::shared_ptr<IExecutor> executor = options_.executor;
 
-      auto response = dispatcher.dispatch(decoded.value());
-      if (!response.has_value()) {
-        return;
-      }
+  transport_->setOnMessage(
+      [this, &dispatcher, record_error, executor](Json incoming) {
+        Message message;
+        try {
+          auto decoded = decode(incoming);
+          if (!decoded.hasValue()) {
+            record_error(decoded.error());
+            return;
+          }
+          if (decoded.value().kind == MessageKind::Response) {
+            return;
+          }
+          message = std::move(decoded.value());
+        } catch (const std::exception& error) {
+          record_error(McpError::make(
+              ErrorCode::InternalError,
+              std::string("failed to decode message: ") + error.what()));
+          return;
+        } catch (...) {
+          record_error(McpError::make(ErrorCode::InternalError,
+                                      "failed to decode message"));
+          return;
+        }
 
-      auto encoded = encode(*response);
-      if (!encoded.hasValue()) {
-        record_error(encoded.error());
-        return;
-      }
+        auto dispatch_and_send =
+            [this, &dispatcher, record_error,
+             message = std::move(message)]() mutable {
+              try {
+                auto response = dispatcher.dispatch(message);
+                if (!response.has_value()) {
+                  return;
+                }
 
-      Status sent = transport_->sendRaw(encoded.value());
-      if (!sent) {
-        record_error(sent.error);
-      }
-    } catch (const std::exception& error) {
-      record_error(McpError::make(
-          ErrorCode::InternalError,
-          std::string("failed to handle message: ") + error.what()));
-    } catch (...) {
-      record_error(McpError::make(ErrorCode::InternalError,
-                                  "failed to handle message"));
-    }
-  });
+                auto encoded = encode(*response);
+                if (!encoded.hasValue()) {
+                  record_error(encoded.error());
+                  return;
+                }
+
+                Status sent = transport_->sendRaw(encoded.value());
+                if (!sent) {
+                  record_error(sent.error);
+                }
+              } catch (const std::exception& error) {
+                record_error(McpError::make(
+                    ErrorCode::InternalError,
+                    std::string("failed to handle message: ") +
+                        error.what()));
+              } catch (...) {
+                record_error(McpError::make(ErrorCode::InternalError,
+                                            "failed to handle message"));
+              }
+            };
+
+        if (!executor) {
+          dispatch_and_send();
+          return;
+        }
+
+        const ExecutorSubmitResult submitted =
+            executor->post(std::move(dispatch_and_send), Priority::Normal);
+        if (submitted) {
+          return;
+        }
+        record_error(McpError::make(
+            ErrorCode::InternalError, "executor rejected request",
+            Json{{"reason",
+                  submitted.kind ==
+                          ExecutorSubmitResult::Kind::RejectedQueueFull
+                      ? "queue_full"
+                      : "stopped"}}));
+      });
 
   transport_->setOnError(
       [record_error](McpError error) { record_error(std::move(error)); });
@@ -98,12 +137,19 @@ Status McpServer::run() {
   if (!started) {
     transport_->close();
     clear_callbacks();
+    if (executor) {
+      executor->drain();
+    }
     return started;
   }
 
   {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return stopping_; });
+  }
+
+  if (executor) {
+    executor->drain();
   }
 
   transport_->close();

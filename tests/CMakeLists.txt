@@ -1,4 +1,4 @@
-﻿list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(doctest)
 
 add_library(tugmcp_tests INTERFACE)
@@ -18,6 +18,7 @@ add_executable(tugmcp_unit_tests
   unit/dispatcher_test.cpp
   unit/client_test.cpp
   unit/canonical_test.cpp
+  unit/executor_test.cpp
   unit/schema_test.cpp)
 target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_unit_tests PRIVATE
