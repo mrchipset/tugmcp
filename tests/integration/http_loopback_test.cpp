@@ -124,7 +124,7 @@ ToolDescriptor echoDescriptor() {
 
 } // namespace
 
-TEST_CASE("HTTP client and server round-trip initialize, listTools and callTool") {
+TEST_CASE("HTTP client and server round-trip discover, listTools and callTool") {
   StreamableHttpServerOptions server_options;
   server_options.bind = "127.0.0.1";
   server_options.port = 0;
@@ -146,13 +146,13 @@ TEST_CASE("HTTP client and server round-trip initialize, listTools and callTool"
   StreamableHttpClientOptions client_options;
   client_options.baseUrl = baseUrlFor(started.port);
   client_options.requestTimeout = std::chrono::milliseconds(2000);
-  client_options.protocolVersion = "2025-11-25";
+  client_options.protocolVersion = "2026-07-28";
   auto client_transport = makeStreamableHttpClientTransport(client_options);
   REQUIRE(client_transport.hasValue());
 
   ClientOptions core_client_options;
   core_client_options.timeoutMs = 2000;
-  core_client_options.protocolVersion = "2025-11-25";
+  core_client_options.protocolVersion = "2026-07-28";
   McpClient client(core_client_options, client_transport.value());
 
   const Status connected = client.connect();
@@ -178,15 +178,17 @@ TEST_CASE("HTTP client and server round-trip initialize, listTools and callTool"
   server_thread.join();
 }
 
-TEST_CASE("GET and DELETE on /mcp return 405") {
+TEST_CASE("2026 GET and DELETE on /mcp return 405") {
   StartedServer started = startServer(StreamableHttpServerOptions{});
 
   httplib::Client client(baseUrlFor(started.port));
-  auto get = client.Get("/mcp");
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2026-07-28");
+  auto get = client.Get("/mcp", headers);
   REQUIRE(get);
   CHECK(get->status == 405);
 
-  auto remove = client.Delete("/mcp");
+  auto remove = client.Delete("/mcp", headers);
   REQUIRE(remove);
   CHECK(remove->status == 405);
 

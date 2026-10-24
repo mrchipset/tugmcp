@@ -56,6 +56,10 @@ struct StreamableHttpServerOptions {
   // so this bounds only the wait for send(response); there is no execution
   // timeout yet.
   std::chrono::milliseconds requestTimeout{30000};
+  // 2025 session limits. A new session over maxSessions gets HTTP 429; expiry
+  // uses timeSource (steady clock by default).
+  std::size_t maxSessions = 128;
+  std::chrono::milliseconds sessionTimeout{std::chrono::minutes(30)};
 };
 
 class HttpServerTransport final : public ITransport {
@@ -65,6 +69,7 @@ public:
   Status start() override;
   Status send(const Json& message) override;
   Status sendTo(std::string_view route, const Json& message) override;
+  Status sendToSession(std::string_view sessionId, const Json& message) override;
   void setOnMessage(std::function<void(Json)> handler) override;
   void setOnMessageEx(MessageHandlerEx handler) override;
   void setOnError(std::function<void(McpError)> handler) override;

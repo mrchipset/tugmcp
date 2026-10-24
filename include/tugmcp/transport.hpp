@@ -18,6 +18,7 @@ namespace v1 {
 struct MessageMetadata {
   std::string protocolVersion;
   std::string route;
+  std::string sessionId;
   bool emergency = false;
 };
 
@@ -42,6 +43,15 @@ public:
   virtual Status sendTo(std::string_view route, const Json& message) {
     (void)route;
     return send(message);
+  }
+
+  // Send to a server-managed session stream (2025 GET stream).
+  virtual Status sendToSession(std::string_view sessionId, const Json& message) {
+    (void)sessionId;
+    (void)message;
+    return Status::failure(McpError::make(
+        ErrorCode::InternalError, "session not supported",
+        Json{{"reason", "session_not_supported"}}));
   }
 
   // Best-effort abort of transport work for the given request. This is the

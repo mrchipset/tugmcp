@@ -120,7 +120,7 @@ ToolDescriptor echoDescriptor() {
 
 } // namespace
 
-TEST_CASE("TLS client and server round-trip initialize, listTools and callTool") {
+TEST_CASE("TLS client and server round-trip discover, listTools and callTool") {
   auto created_server = makeStreamableHttpServerTransport(tlsServerOptions());
   REQUIRE(created_server.hasValue());
   std::shared_ptr<ITransport> server_transport = created_server.value();
@@ -148,7 +148,7 @@ TEST_CASE("TLS client and server round-trip initialize, listTools and callTool")
   client_options.requestTimeout = std::chrono::milliseconds(5000);
   client_options.tls.enabled = true;
   client_options.tls.caBundlePath = fixtureDir() + "ca.pem";
-  client_options.protocolVersion = "2025-11-25";
+  client_options.protocolVersion = "2026-07-28";
 
   client_options.tls.verifyPeer = true;
 
@@ -157,7 +157,7 @@ TEST_CASE("TLS client and server round-trip initialize, listTools and callTool")
 
   ClientOptions core_client_options;
   core_client_options.timeoutMs = 5000;
-  core_client_options.protocolVersion = "2025-11-25";
+  core_client_options.protocolVersion = "2026-07-28";
   McpClient client(core_client_options, created_client.value());
 
   const Status connected = client.connect();

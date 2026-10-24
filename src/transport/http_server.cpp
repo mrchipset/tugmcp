@@ -7,10 +7,14 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
+#include <random>
+#include <sstream>
 #include <deque>
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -241,6 +245,41 @@ public:
     return failure(ErrorCode::InternalError, "unexpected outgoing message");
   }
 
+  Status sendToSession(std::string_view sessionId, const Json& message) {
+    sweepSessions();
+    std::shared_ptr<GetStream> stream;
+    ReplayEvent event;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto it = sessions_.find(std::string(sessionId));
+      if (it == sessions_.end() || !it->second->stream) {
+        return Status::failure(McpError::make(
+            ErrorCode::InternalError, "no session stream",
+            Json{{"reason", "no_session_stream"}}));
+      }
+      auto& session = it->second;
+      event.id = session->next_event_id++;
+      event.message = message;
+      session->replay.push_back(event);
+      while (session->replay.size() > 256) {
+        session->replay.pop_front();
+      }
+      session->last_seen = now();
+      stream = session->stream;
+    }
+    {
+      std::lock_guard<std::mutex> lock(stream->mutex);
+      if (stream->closed) {
+        return Status::failure(McpError::make(
+            ErrorCode::InternalError, "no session stream",
+            Json{{"reason", "no_session_stream"}}));
+      }
+      stream->frames.push_back(event);
+      stream->cv.notify_all();
+    }
+    return Status::success();
+  }
+
   void setOnMessage(std::function<void(Json)> handler) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     on_message_ = std::move(handler);
@@ -273,6 +312,7 @@ public:
     }
 
     std::vector<std::shared_ptr<SseStream>> streams;
+    std::vector<std::shared_ptr<GetStream>> get_streams;
     std::vector<std::string> pending_routes;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
@@ -288,6 +328,14 @@ public:
       for (auto& item : streams_) {
         streams.push_back(item.second);
       }
+      get_streams.reserve(get_streams_.size());
+      for (auto& item : get_streams_) {
+        get_streams.push_back(item.second);
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      sessions_.clear();
     }
     pending_cv_.notify_all();
     for (const auto& route : pending_routes) {
@@ -298,6 +346,9 @@ public:
       std::lock_guard<std::mutex> lock(stream->mutex);
       stream->closed = true;
       stream->cv.notify_all();
+    }
+    for (const auto& stream : get_streams) {
+      closeGetStream(stream);
     }
 
     std::thread listener;
@@ -355,6 +406,30 @@ private:
     std::atomic<bool> released{false};
   };
 
+  struct ReplayEvent {
+    std::uint64_t id = 0;
+    Json message;
+  };
+
+  struct GetStream {
+    std::string route;
+    std::string session_id;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<ReplayEvent> frames;
+    bool closed = false;
+    bool finished = false;
+    std::atomic<bool> released{false};
+  };
+
+  struct Session {
+    std::string id;
+    std::chrono::steady_clock::time_point last_seen;
+    std::shared_ptr<GetStream> stream;
+    std::uint64_t next_event_id = 1;
+    std::deque<ReplayEvent> replay;
+  };
+
   static Status failure(ErrorCode code, std::string message) {
     return Status::failure(McpError::make(code, std::move(message)));
   }
@@ -378,20 +453,314 @@ private:
     }
   }
 
+  std::string generateSessionId() {
+    const std::uint64_t sequence =
+        session_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::random_device random;
+    const std::uint64_t high =
+        (static_cast<std::uint64_t>(random()) << 32) ^
+        static_cast<std::uint64_t>(random());
+    char buffer[33];
+    std::snprintf(buffer, sizeof(buffer), "%016llx%016llx",
+                  static_cast<unsigned long long>(high),
+                  static_cast<unsigned long long>(sequence));
+    return std::string(buffer);
+  }
+
+  void closeGetStream(const std::shared_ptr<GetStream>& stream) noexcept {
+    if (!stream) {
+      return;
+    }
+    try {
+      std::lock_guard<std::mutex> lock(stream->mutex);
+      stream->closed = true;
+      stream->cv.notify_all();
+    } catch (...) {
+    }
+  }
+
+  void sweepSessions() {
+    if (options_.sessionTimeout.count() <= 0) {
+      return;
+    }
+    std::vector<std::shared_ptr<GetStream>> expired;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto current = now();
+      for (auto it = sessions_.begin(); it != sessions_.end();) {
+        if (current - it->second->last_seen >
+            options_.sessionTimeout) {
+          if (it->second->stream) {
+            expired.push_back(it->second->stream);
+          }
+          it = sessions_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (const auto& stream : expired) {
+      closeGetStream(stream);
+    }
+  }
+
+  std::shared_ptr<Session> findSession(const std::string& id) {
+    sweepSessions();
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    const auto it = sessions_.find(id);
+    if (it == sessions_.end()) {
+      return nullptr;
+    }
+    it->second->last_seen = now();
+    return it->second;
+  }
+
+  std::shared_ptr<Session> createSession() {
+    sweepSessions();
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    if (options_.maxSessions != 0 &&
+        sessions_.size() >= options_.maxSessions) {
+      return nullptr;
+    }
+    auto session = std::make_shared<Session>();
+    session->id = generateSessionId();
+    session->last_seen = now();
+    sessions_[session->id] = session;
+    return session;
+  }
+
+  void removeSession(const std::string& id) {
+    std::shared_ptr<GetStream> stream;
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto it = sessions_.find(id);
+      if (it == sessions_.end()) {
+        return;
+      }
+      stream = it->second->stream;
+      sessions_.erase(it);
+    }
+    closeGetStream(stream);
+  }
+
+  void releaseGetStream(const std::string& route,
+                        const std::shared_ptr<GetStream>& stream) noexcept {
+    {
+      std::lock_guard<std::mutex> lock(routes_mutex_);
+      const auto it = get_streams_.find(route);
+      if (it != get_streams_.end() && it->second == stream) {
+        get_streams_.erase(it);
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto it = sessions_.find(stream->session_id);
+      if (it != sessions_.end() && it->second->stream == stream) {
+        it->second->stream.reset();
+      }
+    }
+    notifyRouteClosed(route);
+    bool expected = false;
+    if (stream->released.compare_exchange_strong(expected, true)) {
+      active_streams_.fetch_sub(1, std::memory_order_acq_rel);
+      active_streams_cv_.notify_all();
+    }
+  }
+
+  bool getStreamProvider(const std::shared_ptr<GetStream>& stream,
+                         httplib::DataSink& sink) {
+    auto next_keepalive =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    for (;;) {
+      ReplayEvent event;
+      bool have_event = false;
+      {
+        std::unique_lock<std::mutex> lock(stream->mutex);
+        if (stream->frames.empty() && !stream->closed) {
+          stream->cv.wait_for(lock, std::chrono::milliseconds(25), [&] {
+            return stream->closed || !stream->frames.empty();
+          });
+        }
+        if (stream->closed) {
+          return false;
+        }
+        if (!stream->frames.empty()) {
+          event = std::move(stream->frames.front());
+          stream->frames.pop_front();
+          have_event = true;
+        }
+      }
+
+      if (!have_event) {
+        const auto current = std::chrono::steady_clock::now();
+        if (current >= next_keepalive) {
+          next_keepalive = current + std::chrono::milliseconds(500);
+          static const char keepalive[] = ": keepalive\n\n";
+          if (!sink.write(keepalive, sizeof(keepalive) - 1)) {
+            closeGetStream(stream);
+            return false;
+          }
+        }
+        continue;
+      }
+
+      std::string encoded;
+      try {
+        encoded = "id: " + std::to_string(event.id) +
+                  "\nevent: message\ndata: " + event.message.dump() +
+                  "\n\n";
+      } catch (...) {
+        closeGetStream(stream);
+        return false;
+      }
+      if (!sink.write(encoded.data(), encoded.size())) {
+        closeGetStream(stream);
+        return false;
+      }
+    }
+  }
+
+  void handleGet(const httplib::Request& request,
+                 httplib::Response& response) {
+    try {
+      const std::string version =
+          request.get_header_value("MCP-Protocol-Version");
+      if (version == "2026-07-28") {
+        response.status = 405;
+        return;
+      }
+      const std::string session_id =
+          request.get_header_value("MCP-Session-Id");
+      if (session_id.empty()) {
+        response.status = 400;
+        return;
+      }
+      auto session = findSession(session_id);
+      if (!session) {
+        response.status = 404;
+        return;
+      }
+
+      const std::string last_event =
+          request.get_header_value("Last-Event-ID");
+      std::uint64_t last_id = 0;
+      if (!last_event.empty()) {
+        bool valid = true;
+        std::uint64_t value = 0;
+        for (const char character : last_event) {
+          if (character < '0' || character > '9') {
+            valid = false;
+            break;
+          }
+          if (value > (std::numeric_limits<std::uint64_t>::max() -
+                       static_cast<std::uint64_t>(character - '0')) /
+                          10) {
+            valid = false;
+            break;
+          }
+          value = value * 10 + static_cast<std::uint64_t>(character - '0');
+        }
+        last_id = valid ? value : 0;
+      }
+
+      auto stream = std::make_shared<GetStream>();
+      stream->route = nextRoute();
+      stream->session_id = session_id;
+
+      std::vector<ReplayEvent> replay;
+      std::shared_ptr<GetStream> previous;
+      {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        const auto it = sessions_.find(session_id);
+        if (it == sessions_.end()) {
+          response.status = 404;
+          return;
+        }
+        auto& current = it->second;
+        current->last_seen = now();
+        if (!current->replay.empty()) {
+          const std::uint64_t first = current->replay.front().id;
+          const bool replay_all = last_id == 0 || last_id + 1 < first;
+          for (const auto& event : current->replay) {
+            if (replay_all || event.id > last_id) {
+              replay.push_back(event);
+            }
+          }
+        }
+        previous = current->stream;
+        current->stream = stream;
+      }
+      closeGetStream(previous);
+
+      {
+        std::lock_guard<std::mutex> lock(stream->mutex);
+        for (auto& event : replay) {
+          stream->frames.push_back(std::move(event));
+        }
+      }
+      active_streams_.fetch_add(1, std::memory_order_acq_rel);
+      {
+        std::lock_guard<std::mutex> lock(routes_mutex_);
+        get_streams_[stream->route] = stream;
+      }
+
+      response.set_header("Cache-Control", "no-cache");
+      response.status = 200;
+      const std::string route = stream->route;
+      response.set_chunked_content_provider(
+          "text/event-stream",
+          [this, stream](std::size_t, httplib::DataSink& sink) {
+            return getStreamProvider(stream, sink);
+          },
+          [this, route, stream](bool) { releaseGetStream(route, stream); });
+    } catch (...) {
+      response.status = 500;
+    }
+  }
+
+  void handleDelete(const httplib::Request& request,
+                    httplib::Response& response) {
+    try {
+      const std::string version =
+          request.get_header_value("MCP-Protocol-Version");
+      if (version == "2026-07-28") {
+        response.status = 405;
+        return;
+      }
+      const std::string session_id =
+          request.get_header_value("MCP-Session-Id");
+      if (session_id.empty()) {
+        response.status = 400;
+        return;
+      }
+      auto session = findSession(session_id);
+      if (!session) {
+        response.status = 404;
+        return;
+      }
+      removeSession(session_id);
+      response.status = 204;
+    } catch (...) {
+      response.status = 500;
+    }
+  }
+
   void registerHandlers() {
     server_->Post("/mcp",
                   [this](const httplib::Request& request,
                          httplib::Response& response) {
                     handlePost(request, response);
                   });
-    server_->Get("/mcp", [](const httplib::Request&,
-                            httplib::Response& response) {
-      response.status = 405;
-    });
-    server_->Delete("/mcp", [](const httplib::Request&,
-                               httplib::Response& response) {
-      response.status = 405;
-    });
+    server_->Get("/mcp",
+                 [this](const httplib::Request& request,
+                        httplib::Response& response) {
+                   handleGet(request, response);
+                 });
+    server_->Delete("/mcp",
+                    [this](const httplib::Request& request,
+                           httplib::Response& response) {
+                      handleDelete(request, response);
+                    });
   }
 
   std::chrono::steady_clock::time_point now() const {
@@ -713,7 +1082,8 @@ private:
       }
 
       const Message& message = decoded.value();
-      if (message.kind == MessageKind::Response) {
+      const bool is_2025 = version == "2025-11-25";
+      if (message.kind == MessageKind::Response && !is_2025) {
         respondError(response, 400,
                      McpError::make(ErrorCode::InvalidRequest,
                                     "response is not a request"));
@@ -753,6 +1123,23 @@ private:
       }
       const Json& document = parsed.value();
 
+      std::string session_id;
+      if (is_2025 && message.method != "initialize") {
+        session_id = request.get_header_value("MCP-Session-Id");
+        if (session_id.empty()) {
+          respondError(response, 400,
+                       McpError::make(ErrorCode::InvalidRequest,
+                                      "missing session id",
+                                      Json{{"reason", "missing_session"}}),
+                       message.id.toJson());
+          return;
+        }
+        if (!findSession(session_id)) {
+          response.status = 404;
+          return;
+        }
+      }
+
       if (version == "2026-07-28" && message.params.is_object() &&
           message.params.contains("_meta") &&
           message.params.at("_meta").is_object() &&
@@ -790,6 +1177,19 @@ private:
         emergency = decision == AdmissionDecision::Emergency;
       }
 
+      if (message.kind == MessageKind::Response) {
+        if (hasMessageHandler()) {
+          MessageMetadata metadata;
+          metadata.protocolVersion = version;
+          metadata.sessionId = session_id;
+          metadata.emergency = emergency;
+          invokeMessage(document, metadata);
+        }
+        response.status = 202;
+        response.set_content("", "application/json");
+        return;
+      }
+
       if (!hasMessageHandler()) {
         if (message.kind == MessageKind::Notification) {
           response.status = 202;
@@ -822,6 +1222,7 @@ private:
         MessageMetadata metadata;
         metadata.protocolVersion = version;
         metadata.route = route;
+        metadata.sessionId = session_id;
         metadata.emergency = emergency;
         const bool invoked = invokeMessage(document, metadata);
         erasePending(route);
@@ -876,6 +1277,7 @@ private:
         MessageMetadata metadata;
         metadata.protocolVersion = version;
         metadata.route = route;
+        metadata.sessionId = session_id;
         metadata.emergency = emergency;
         if (!invokeMessage(document, metadata)) {
           const McpError error = McpError::make(
@@ -905,6 +1307,7 @@ private:
       MessageMetadata metadata;
       metadata.protocolVersion = version;
       metadata.route = route;
+      metadata.sessionId = session_id;
       metadata.emergency = emergency;
       if (!invokeMessage(document, metadata)) {
         erasePending(route);
@@ -944,6 +1347,17 @@ private:
       pending_.erase(route);
       lock.unlock();
 
+      if (is_2025 && message.kind == MessageKind::Request &&
+          message.method == "initialize" && body.is_object() &&
+          body.contains("result")) {
+        auto session = createSession();
+        if (!session) {
+          response.status = 429;
+          return;
+        }
+        response.set_header("MCP-Session-Id", session->id);
+      }
+
       respondJson(response, 200, body);
     } catch (...) {
       respondError(response, 500,
@@ -973,6 +1387,10 @@ private:
   std::condition_variable pending_cv_;
   std::unordered_map<std::string, std::shared_ptr<Pending>> pending_;
   std::unordered_map<std::string, std::shared_ptr<SseStream>> streams_;
+  std::unordered_map<std::string, std::shared_ptr<GetStream>> get_streams_;
+  std::mutex sessions_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
+  std::atomic<std::uint64_t> session_counter_{0};
   std::atomic<std::size_t> active_streams_{0};
   std::condition_variable active_streams_cv_;
   std::atomic<std::uint64_t> route_counter_{0};
@@ -992,6 +1410,11 @@ Status HttpServerTransport::send(const Json& message) {
 Status HttpServerTransport::sendTo(std::string_view route,
                                    const Json& message) {
   return impl_->sendTo(route, message);
+}
+
+Status HttpServerTransport::sendToSession(std::string_view sessionId,
+                                          const Json& message) {
+  return impl_->sendToSession(sessionId, message);
 }
 
 void HttpServerTransport::setOnMessage(

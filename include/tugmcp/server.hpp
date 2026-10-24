@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,14 @@ public:
   // Push notifications to matching 2026 subscriptions. Failures remove the
   // affected subscription; these methods never hold the registry lock while
   // calling into the transport.
+  Result<Json> requestClient(std::string_view sessionId,
+                             std::string_view method,
+                             Json params = Json::object(),
+                             std::chrono::milliseconds timeout =
+                                 std::chrono::seconds(30));
+  Status sendNotification(std::string_view sessionId,
+                          std::string_view method,
+                          Json params = Json::object());
   void notifyResourceUpdated(std::string_view uri);
   void notifyListChanged(ListKind kind);
   std::size_t activeSubscriptions() const;
@@ -79,6 +88,14 @@ private:
   void removeSubscription(const SubscriptionId& id);
   void clearSubscriptions() noexcept;
   void handleRouteClosed(const std::string& route);
+  void completeServerRequests(const McpError& error) noexcept;
+  struct PendingClientResponse {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    Json result;
+    std::optional<McpError> error;
+  };
 
   // transport_ is declared first so it is destroyed last.
   std::shared_ptr<ITransport> transport_;
@@ -95,6 +112,11 @@ private:
   mutable std::mutex subscriptions_mutex_;
   std::unordered_map<SubscriptionId, SubscriptionState> subscriptions_;
   std::atomic<std::uint64_t> next_subscription_id_{1};
+  std::atomic<std::int64_t> next_server_request_id_{1};
+  std::mutex server_requests_mutex_;
+  std::unordered_map<RequestId, std::shared_ptr<PendingClientResponse>,
+                     std::hash<RequestId>>
+      server_requests_;
 };
 
 } // namespace v1

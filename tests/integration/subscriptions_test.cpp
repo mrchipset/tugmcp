@@ -6,6 +6,8 @@
 #include <tugmcp/server.hpp>
 #include <tugmcp/transport/http.hpp>
 
+#include "tugmcp/detail/http_httplib.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -326,17 +328,42 @@ TEST_CASE("2025 subscriptions/listen returns MethodNotFound") {
   RunningServer running(options);
   running.start();
 
-  auto client_storage = makeClient(running.port(), "2025-11-25");
-  McpClient& client = *client_storage;
-  REQUIRE(client.connect().ok);
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers initialize_headers;
+  initialize_headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  const Json initialize_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 1},
+           {"method", "initialize"},
+           {"params", Json{{"protocolVersion", "2025-11-25"}}}};
+  auto initialized =
+      client.Post("/mcp", initialize_headers, initialize_body.dump(),
+                  "application/json");
+  REQUIRE(initialized);
+  REQUIRE(initialized->status == 200);
+  const std::string session_id =
+      initialized->get_header_value("MCP-Session-Id");
+  REQUIRE_FALSE(session_id.empty());
 
-  SubscriptionFilter filter;
-  filter.resources = {"mem://a"};
-  auto subscribed = client.subscribe(filter, [](const Json&) {});
-  REQUIRE_FALSE(subscribed.hasValue());
-  CHECK(static_cast<int>(subscribed.error().code) == -32601);
+  httplib::Headers listen_headers;
+  listen_headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  listen_headers.emplace("MCP-Session-Id", session_id);
+  listen_headers.emplace("Accept", "application/json");
+  const Json listen_body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 2},
+           {"method", "subscriptions/listen"},
+           {"params",
+            Json{{"subscriptions",
+                  Json{{"resources", Json::array({"mem://a"})}}}}}};
+  auto listened = client.Post("/mcp", listen_headers, listen_body.dump(),
+                              "application/json");
+  REQUIRE(listened);
+  REQUIRE(listened->status == 200);
+  const Json response = Json::parse(listened->body);
+  CHECK(response.at("error").at("code") == -32601);
 
-  client.close();
+  client.stop();
   running.stop();
 }
 

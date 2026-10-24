@@ -182,6 +182,9 @@ Status McpServer::run() {
     } catch (...) {
     }
     clearSubscriptions();
+    completeServerRequests(McpError::make(
+        ErrorCode::InternalError, "transport is closed",
+        Json{{"reason", "transport_closed"}}));
   };
 
   struct CleanupGuard {
@@ -248,6 +251,31 @@ Status McpServer::run() {
               return;
             }
             if (decoded.value().kind == MessageKind::Response) {
+              Message response = std::move(decoded.value());
+              std::shared_ptr<PendingClientResponse> pending;
+              {
+                std::lock_guard<std::mutex> lock(server_requests_mutex_);
+                const auto it = server_requests_.find(response.id);
+                if (it != server_requests_.end()) {
+                  pending = it->second;
+                }
+              }
+              if (!pending) {
+                return;
+              }
+              {
+                std::lock_guard<std::mutex> lock(pending->mutex);
+                if (pending->done) {
+                  return;
+                }
+                pending->done = true;
+                if (response.error.has_value()) {
+                  pending->error = std::move(response.error);
+                } else {
+                  pending->result = std::move(response.result);
+                }
+              }
+              pending->cv.notify_all();
               return;
             }
             message = std::move(decoded.value());
@@ -640,6 +668,116 @@ void McpServer::handleRouteClosed(const std::string& route) {
         ++it;
       }
     }
+  }
+}
+
+Result<Json> McpServer::requestClient(std::string_view sessionId,
+                                      std::string_view method, Json params,
+                                      std::chrono::milliseconds timeout) {
+  if (!transport_) {
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::InternalError, "transport is null",
+        Json{{"reason", "transport_closed"}}));
+  }
+
+  const std::int64_t numeric_id =
+      next_server_request_id_.fetch_add(1, std::memory_order_relaxed);
+  RequestId id;
+  id.value = numeric_id;
+  auto pending = std::make_shared<PendingClientResponse>();
+  {
+    std::lock_guard<std::mutex> lock(server_requests_mutex_);
+    server_requests_[id] = pending;
+  }
+
+  Json request;
+  request["jsonrpc"] = "2.0";
+  request["id"] = numeric_id;
+  request["method"] = std::string(method);
+  request["params"] = std::move(params);
+
+  Status sent = Status::failure(McpError::make(
+      ErrorCode::InternalError, "failed to send server request"));
+  try {
+    sent = transport_->sendToSession(sessionId, request);
+  } catch (const std::exception& error) {
+    sent = Status::failure(McpError::make(
+        ErrorCode::InternalError,
+        std::string("failed to send server request: ") + error.what()));
+  } catch (...) {
+  }
+  if (!sent) {
+    {
+      std::lock_guard<std::mutex> lock(server_requests_mutex_);
+      server_requests_.erase(id);
+    }
+    return Result<Json>::failure(sent.error);
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(pending->mutex);
+  const bool completed = pending->cv.wait_until(
+      lock, deadline, [&pending] { return pending->done; });
+  if (!completed) {
+    lock.unlock();
+    {
+      std::lock_guard<std::mutex> registry_lock(server_requests_mutex_);
+      server_requests_.erase(id);
+    }
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::InternalError, "server request timed out",
+        Json{{"reason", "timeout"}}));
+  }
+
+  Json result = std::move(pending->result);
+  std::optional<McpError> error = std::move(pending->error);
+  lock.unlock();
+  {
+    std::lock_guard<std::mutex> registry_lock(server_requests_mutex_);
+    server_requests_.erase(id);
+  }
+  if (error.has_value()) {
+    return Result<Json>::failure(std::move(*error));
+  }
+  return result;
+}
+
+Status McpServer::sendNotification(std::string_view sessionId,
+                                   std::string_view method, Json params) {
+  if (!transport_) {
+    return Status::failure(McpError::make(
+        ErrorCode::InternalError, "transport is null",
+        Json{{"reason", "transport_closed"}}));
+  }
+  Json notification;
+  notification["jsonrpc"] = "2.0";
+  notification["method"] = std::string(method);
+  notification["params"] = std::move(params);
+  return transport_->sendToSession(sessionId, notification);
+}
+
+void McpServer::completeServerRequests(const McpError& error) noexcept {
+  try {
+    std::vector<std::shared_ptr<PendingClientResponse>> pending_requests;
+    {
+      std::lock_guard<std::mutex> lock(server_requests_mutex_);
+      for (auto& item : server_requests_) {
+        pending_requests.push_back(item.second);
+      }
+      server_requests_.clear();
+    }
+    for (const auto& pending : pending_requests) {
+      {
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        if (pending->done) {
+          continue;
+        }
+        pending->done = true;
+        pending->error = error;
+      }
+      pending->cv.notify_all();
+    }
+  } catch (...) {
   }
 }
 

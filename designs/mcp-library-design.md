@@ -800,6 +800,14 @@ public:
 | 订阅 | `resources/subscribe` 等 | `subscriptions/listen` + `resourceSubscriptions` |
 | 关闭 | DELETE session/关闭 stream | 关闭 SSE/HTTP；无 session 可删 |
 
+**P3 实现约定（2025，本节为权威）**：
+- `initialize` 响应头返回 `MCP-Session-Id`（不透明 32 hex）；此后 2025 `POST /mcp` 必须携带该头：缺失 → 400 + `data.reason="missing_session"`，未知/过期 → 404。
+- `DELETE /mcp` 关闭该 session 的所有 stream 并返回 204；`GET /mcp` 打开 server→client SSE 流，事件带单调递增 `id:`；每个 session 至多一条活跃 GET 流，保留最近 256 条用于 `Last-Event-ID` replay（超出范围则从最早可用事件开始）。
+- session 上限默认 128、过期默认 30 分钟（`ITimeSource` 驱动）；超限 → 429。
+- server→client 请求：库生成 JSON-RPC id，经该 session 的 GET 流发送并等待 POST 回来的响应；API 为 `Result<Json> requestClient(sessionId, method, params, timeout)`；无活跃 GET 流 → `data.reason="no_session_stream"`；超时 → `data.reason="timeout"`。
+- 主机通知：`Status sendNotification(sessionId, method, params)` 经 GET 流投递，用于 2025 `notifications/*` 与资源更新。
+- 2026 请求忽略 session 头，仍走 stateless 路径。
+
 ### 13.3 关键映射
 
 | 能力 | 库负责 | 应用负责 |
