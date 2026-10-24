@@ -487,3 +487,31 @@ TEST_CASE("same request id on two routes both observe stop cancellation") {
   CHECK(status.ok);
   CHECK(observed_cancelled.load() == 2);
 }
+TEST_CASE("2025 stdio resource subscription is rejected without a session") {
+  auto transport = std::make_shared<ManualTransport>();
+  ServerOptions options;
+  McpServer server(options, transport);
+
+  auto run_future =
+      std::async(std::launch::async, [&server] { return server.run(); });
+  transport->waitReady();
+
+  MessageMetadata metadata;
+  metadata.protocolVersion = "2025-11-25";
+  const Json request =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 1},
+           {"method", "resources/subscribe"},
+           {"params", Json{{"uri", "test://stdio-resource"}}}};
+  transport->deliver(request, metadata);
+
+  server.stop();
+  const Status status = run_future.get();
+  REQUIRE(status.ok);
+  const std::vector<Json> sent = transport->sent();
+  REQUIRE(sent.size() == 1);
+  CHECK(sent.front().at("id") == 1);
+  CHECK(sent.front().at("error").at("code") == -32603);
+  CHECK(sent.front().at("error").at("data").at("reason") ==
+        "subscriptions_require_session");
+}

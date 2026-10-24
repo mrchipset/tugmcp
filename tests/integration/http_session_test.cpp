@@ -702,3 +702,93 @@ TEST_CASE("2026 logging/setLevel remains 404") {
   client.stop();
   running.stop();
 }
+TEST_CASE("2025 resource update fans out to subscribed sessions only") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+  const std::string session_a = initializeSession(running.port());
+  const std::string session_b = initializeSession(running.port());
+  const std::string session_c = initializeSession(running.port());
+  const std::string uri = "test://fanout-resource";
+
+  httplib::Client client(baseUrlFor(running.port()));
+  auto subscribe = [&](const std::string& session_id, int id) {
+    const Json body = Json{{"jsonrpc", "2.0"},
+                           {"id", id},
+                           {"method", "resources/subscribe"},
+                           {"params", Json{{"uri", uri}}}};
+    auto response = client.Post("/mcp", sessionHeaders(session_id),
+                                body.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 200);
+  };
+  subscribe(session_a, 10);
+  subscribe(session_b, 11);
+
+  Reader reader_a;
+  Reader reader_b;
+  Reader reader_c;
+  startReader(running.port(), sessionHeaders(session_a), reader_a);
+  startReader(running.port(), sessionHeaders(session_b), reader_b);
+  startReader(running.port(), sessionHeaders(session_c), reader_c);
+
+  REQUIRE(waitUntil(
+      [&] {
+        running.server().notifyResourceUpdated(uri);
+        return waitForText(reader_a, "notifications/resources/updated",
+                           std::chrono::milliseconds(20)) &&
+               waitForText(reader_b, "notifications/resources/updated",
+                           std::chrono::milliseconds(20));
+      },
+      std::chrono::seconds(2)));
+
+  REQUIRE(running.server()
+              .sendNotification(session_c, "notifications/message",
+                                Json{{"data", "marker-c"}})
+              .ok);
+  REQUIRE(waitForText(reader_c, "marker-c", std::chrono::seconds(2)));
+  CHECK(readerSnapshot(reader_c).find("notifications/resources/updated") ==
+        std::string::npos);
+
+  running.stop();
+  for (Reader* reader : {&reader_a, &reader_b, &reader_c}) {
+    if (reader->thread.joinable()) {
+      reader->thread.join();
+    }
+  }
+}
+
+TEST_CASE("session delete clears logging and resource subscriptions") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+  const std::string session_id = initializeSession(running.port());
+  const std::string uri = "test://cleanup-resource";
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json set_body = Json{{"jsonrpc", "2.0"},
+                             {"id", 2},
+                             {"method", "logging/setLevel"},
+                             {"params", Json{{"level", "info"}}}};
+  auto set = client.Post("/mcp", sessionHeaders(session_id),
+                         set_body.dump(), "application/json");
+  REQUIRE(set);
+  REQUIRE(running.server().logLevel(session_id).has_value());
+
+  const Json subscribe_body = Json{{"jsonrpc", "2.0"},
+                                   {"id", 3},
+                                   {"method", "resources/subscribe"},
+                                   {"params", Json{{"uri", uri}}}};
+  auto subscribed = client.Post("/mcp", sessionHeaders(session_id),
+                                subscribe_body.dump(), "application/json");
+  REQUIRE(subscribed);
+
+  auto removed = client.Delete("/mcp", sessionHeaders(session_id));
+  REQUIRE(removed);
+  CHECK(removed->status == 204);
+  CHECK_FALSE(running.server().logLevel(session_id).has_value());
+
+  running.server().notifyResourceUpdated(uri);
+  CHECK_FALSE(running.server().lastError().has_value());
+
+  client.stop();
+  running.stop();
+}

@@ -517,20 +517,39 @@ Status McpServer::run() {
               }
               const std::string uri =
                   params.at("uri").get<std::string>();
-              std::lock_guard<std::mutex> lock(logging_mutex_);
-              auto& subscriptions =
-                  resource_subscriptions_[metadata.sessionId];
-              if (message.method == "resources/subscribe") {
-                subscriptions.insert(uri);
-              } else {
-                const auto it = subscriptions.find(uri);
-                if (it == subscriptions.end()) {
-                  send_invalid("resource is not subscribed");
-                  return;
-                }
-                subscriptions.erase(it);
+              if (metadata.sessionId.empty()) {
+                Message response;
+                response.kind = MessageKind::Response;
+                response.jsonrpc = "2.0";
+                response.id = message.id;
+                response.error = McpError::make(
+                    ErrorCode::InternalError,
+                    "resource subscriptions require a session",
+                    Json{{"reason", "subscriptions_require_session"}});
+                send_response(metadata.route, response);
+                return;
               }
-              send_empty();
+              bool unknown_subscription = false;
+              {
+                std::lock_guard<std::mutex> lock(logging_mutex_);
+                auto& subscriptions =
+                    resource_subscriptions_[metadata.sessionId];
+                if (message.method == "resources/subscribe") {
+                  subscriptions.insert(uri);
+                } else {
+                  const auto it = subscriptions.find(uri);
+                  if (it == subscriptions.end()) {
+                    unknown_subscription = true;
+                  } else {
+                    subscriptions.erase(it);
+                  }
+                }
+              }
+              if (unknown_subscription) {
+                send_invalid("resource is not subscribed");
+              } else {
+                send_empty();
+              }
               return;
             }
           }
@@ -790,8 +809,21 @@ void McpServer::notifyResourceUpdated(std::string_view uri) {
     } catch (...) {
     }
     if (!sent) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      last_error_ = sent.error;
+      const std::string reason =
+          sent.error.data.is_object() &&
+                  sent.error.data.contains("reason") &&
+                  sent.error.data.at("reason").is_string()
+              ? sent.error.data.at("reason").get<std::string>()
+              : std::string{};
+      const bool benign =
+          reason == "no_session_stream" ||
+          reason == "session_closed" ||
+          reason == "route_not_found" ||
+          reason == "transport_closed";
+      if (!benign) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_error_ = sent.error;
+      }
     }
   }
 }

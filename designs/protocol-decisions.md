@@ -284,7 +284,7 @@
 **背景**：2026-07-28 必需场景已清零（121/121）；2025-11-25 仍有 8 个失败，其中 4 个是库缺口（`logging/setLevel`、`resources/subscribe`/`unsubscribe` 及依赖它们的 logging 场景），其余是 fixture 未实现 sampling/elicitation。
 
 **决策**：
-1. **2025 logging**：`ServerCapabilities.logging = {}`；实现 `logging/setLevel`（params.level ∈ debug/info/notice/warning/error/critical/alert/emergency）。级别按 2025 session 保存（`sessionId → level`），非法级别 → `-32602`。`notifications/message` 仅在 session 设置了级别时发送；2026 使用 `_meta["io.modelcontextprotocol/logLevel"]`，不支持该方法（404）。
+1. **2025 logging**：`ServerCapabilities.logging = {}`；实现 `logging/setLevel`（params.level ∈ debug/info/notice/warning/error/critical/alert/emergency）。级别按 2025 session 保存（`sessionId → level`），非法级别 → `-32602`。`notifications/message` 仅在 session 设置了级别时发送。2026 的 `logging/setLevel` 移除（404）；`_meta["io.modelcontextprotocol/logLevel"]` 与 severity gating **延后到 P4**（当前未实现，设计不声称已支持）。
 2. **2025 资源订阅**：实现 `resources/subscribe`/`resources/unsubscribe`（params.uri），按 `(sessionId, uri)` 注册；2025 capability `resources.subscribe=true`；`notifyResourceUpdated(uri)` 向已订阅 session 的 GET 流发送 `notifications/resources/updated`（params.uri）。2026 仍不支持 per-URI（D18）；两者不得混用。
 3. **RequestContext.sessionId**：增加 `std::string sessionId`，从 `MessageMetadata.sessionId` 填充；handler 可用它调用 `requestClient`/`sendNotification`（2025 server→client 场景）。
 4. **fixture**：2025 sampling/elicitation 诊断工具仅存在于 `tests/conformance/fixture_server.cpp`，通过 `requestClient(sessionId, ...)` 发起，按 `clientCapabilities` gate（缺失 → `-32021`）。

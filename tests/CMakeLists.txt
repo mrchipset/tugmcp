@@ -110,4 +110,16 @@ if(TUGMCP_CONFORMANCE)
     LABELS conformance
     TIMEOUT 1800
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+  add_test(NAME conformance.external.2025
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/conformance/run_external.py
+      --fixture-server $<TARGET_FILE:tugmcp_conformance_server>
+      --revision 2025-11-25
+      --out ${CMAKE_BINARY_DIR}/conformance/2025-11-25
+      --expected-failures ${CMAKE_CURRENT_SOURCE_DIR}/conformance/expected_failures.yaml)
+  set_tests_properties(conformance.external.2025 PROPERTIES
+    LABELS conformance
+    TIMEOUT 1800
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()

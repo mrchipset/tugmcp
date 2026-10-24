@@ -37,6 +37,8 @@ struct RequestContext {
   std::shared_ptr<CancellationToken> cancellation;
   Json inputResponses;
   std::optional<std::string> requestState;
+  // Client-declared and unverified. Never use this as an authorization
+  // input (D10); the host remains responsible for authorization.
   Json clientCapabilities;
   std::optional<RequestId> subscriptionId;
   std::string sessionId;
