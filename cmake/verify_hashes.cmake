@@ -31,3 +31,12 @@ _tugmcp_verify_hash("LICENSES/doctest-MIT.txt"
   "0fe0b331fa1513dcce8604ff1fa925f32d1cea17d8aeb1c2471fad40d291adc5")
 _tugmcp_verify_hash("LICENSES/nlohmann-json-MIT.txt"
   "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603")
+_tugmcp_verify_hash("LICENSES/jsoncons-BSL-1.0.txt"
+  "97550c71a0bdfc20bf85c6c5167d7b7785f9bd3448baee048fbedf742ed52270")
+_tugmcp_verify_hash("LICENSES/valijson-BSD-2-Clause.txt"
+  "61b5766db38eaa3f320c366357956d7743424bfbf90fd78f5943866ba237589e")
+
+# Multi-file vendored libraries use per-file manifests.
+include("${CMAKE_CURRENT_LIST_DIR}/verify_manifest.cmake")
+tugmcp_verify_manifest("${_tugmcp_root}/3rd/jsoncons/MANIFEST.sha256")
+tugmcp_verify_manifest("${_tugmcp_root}/3rd/valijson/MANIFEST.sha256")

@@ -34,6 +34,10 @@ int main() {
   ServerOptions options;
   options.name = "tugmcp-echo";
   options.version = "0.1.0";
+  // This demo deliberately opts out of schema validation so it can run without
+  // an extra schema target. Production hosts should inject a validator via
+  // options.schemaValidator and leave this false (the fail-closed default).
+  options.allowUnvalidatedTools = true;
 
   McpServer server(options, makeStdioTransport());
 

@@ -44,6 +44,27 @@ Json descriptorToJson(const ToolDescriptor& descriptor) {
   return value;
 }
 
+std::string describeIssues(const Json& data) {
+  std::string text;
+  if (!data.is_object() || !data.contains("issues") ||
+      !data.at("issues").is_array()) {
+    return text;
+  }
+  for (const auto& issue : data.at("issues")) {
+    if (!text.empty()) {
+      text += "; ";
+    }
+    text += issue.value("path", std::string{});
+    const std::string keyword = issue.value("keyword", std::string{});
+    if (!keyword.empty()) {
+      text += " [";
+      text += keyword;
+      text += "]";
+    }
+  }
+  return text;
+}
+
 Result<Json> toolResultToJson(const ToolResult& result) {
   Json content = Json::array();
   for (const auto& block : result.content) {
@@ -92,6 +113,11 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request) {
     arguments = params.at("arguments");
   }
 
+  Status input_status = registry.validateInput(name, arguments);
+  if (!input_status) {
+    return Result<Json>::failure(input_status.error);
+  }
+
   CancellationToken token;
   RequestContext context{request.id, request.method, &token};
 
@@ -100,7 +126,31 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request) {
     if (!called.hasValue()) {
       return Result<Json>::failure(called.error());
     }
-    return toolResultToJson(called.value());
+
+    ToolResult result = called.value();
+    const auto descriptor = registry.find(name);
+    if (descriptor && !descriptor->outputSchema.is_null()) {
+      if (result.structuredContent.is_null()) {
+        result.isError = true;
+        result.content.push_back(ContentBlock{
+            "text",
+            "output schema is declared but structuredContent is missing"});
+      } else {
+        Status output_status =
+            registry.validateOutput(name, result.structuredContent);
+        if (!output_status) {
+          result.isError = true;
+          std::string note = "output validation failed: " +
+                             output_status.error.message;
+          const std::string details = describeIssues(output_status.error.data);
+          if (!details.empty()) {
+            note += " [" + details + "]";
+          }
+          result.content.push_back(ContentBlock{"text", std::move(note)});
+        }
+      }
+    }
+    return toolResultToJson(result);
   } catch (const std::exception& error) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InternalError,
@@ -178,7 +228,10 @@ std::optional<Message> Dispatcher::dispatch(const Message& request) {
 
 McpServer::McpServer(ServerOptions options,
                      std::shared_ptr<ITransport> transport)
-    : transport_(std::move(transport)), options_(std::move(options)) {}
+    : transport_(std::move(transport)), options_(std::move(options)) {
+  tools_.setValidationPolicy(options_.schemaValidator,
+                             options_.allowUnvalidatedTools);
+}
 
 McpServer::~McpServer() {
   if (transport_) {

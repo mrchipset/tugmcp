@@ -1,4 +1,4 @@
-// End-to-end test: a real McpServer over StdioTransport connected to the test
+﻿// End-to-end test: a real McpServer over StdioTransport connected to the test
 // through anonymous pipes. No sleeps are used; the server exits on pipe EOF.
 
 #include <doctest/doctest.h>
@@ -28,6 +28,16 @@ using mcp::v1::Result;
 using mcp::v1::ServerOptions;
 using mcp::v1::StdioOptions;
 using mcp::v1::ToolDescriptor;
+
+namespace {
+ServerOptions permissiveServerOptions() {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  return options;
+}
+
+} // namespace
+
 using mcp::v1::ToolHandlerPtr;
 using mcp::v1::ToolResult;
 using mcp::v1::decode;
@@ -107,7 +117,7 @@ TEST_CASE("stdio server answers tools/call end to end") {
   options.output = server_out;
   options.setBinaryMode = false;
 
-  McpServer server(ServerOptions{}, makeStdioTransport(options));
+  McpServer server(permissiveServerOptions(), makeStdioTransport(options));
   REQUIRE(server.tools().add(echoDescriptor(), std::make_shared<EchoHandler>()));
   std::thread server_thread([&server] { server.run(); });
 
@@ -151,7 +161,7 @@ TEST_CASE("stdio server survives a malformed line and keeps serving") {
   options.output = server_out;
   options.setBinaryMode = false;
 
-  McpServer server(ServerOptions{}, makeStdioTransport(options));
+  McpServer server(permissiveServerOptions(), makeStdioTransport(options));
   std::thread server_thread([&server] { server.run(); });
 
   writeLine(client_out, R"({"jsonrpc":"2.0","id":)");

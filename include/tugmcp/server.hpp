@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include <tugmcp/schema.hpp>
 #include <tugmcp/time_source.hpp>
 #include <tugmcp/tool.hpp>
 #include <tugmcp/transport.hpp>
@@ -17,6 +18,11 @@ struct ServerOptions {
   std::string name = "tugmcp";
   std::string version = "0.1.0";
   std::shared_ptr<ITimeSource> timeSource;
+
+  // Schema validation policy. With no validator and a tool that declares an
+  // inputSchema, registration fails unless allowUnvalidatedTools is true.
+  SchemaValidatorPtr schemaValidator;
+  bool allowUnvalidatedTools = false;
 };
 
 class McpServer {

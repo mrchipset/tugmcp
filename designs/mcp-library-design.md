@@ -1047,6 +1047,8 @@ public:
 ### 17.2 失败策略
 
 - 工具声明了 `inputSchema` 但未配置 validator 且 `allowUnvalidatedTools=false` → **注册/调用失败**（fail closed）。
+- 空 schema 对象 `{}` 视为「未声明 schema」（不校验）；显式 `null` 视为非法声明 → 注册失败。
+- 工具名**不得包含 `#`**（输出 schema 的 id 为 `<name>#output`，避免撞车）。
 - `outputSchema` 存在时，校验 `structuredContent`；失败返回 tool error（不是协议错误）。
 - 编译一次，调用多次；schema 不可在运行中静默变更；变更发 `list_changed`。
 - `NullSchemaValidator` 只能在测试 target 使用。

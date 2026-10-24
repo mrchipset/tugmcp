@@ -1,0 +1,10 @@
+name: jsoncons
+version: v1.10.0
+commit: 9e57e421285422d7aeeb5aa7dc839f6a19121ee6
+tarball-sha256: c829350a2eece662beb378143e2ab1c1cbb07d703687bf168626665a8a7d8bc1
+source: https://codeload.github.com/danielaparker/jsoncons/tar.gz/refs/tags/v1.10.0
+license: BSL-1.0 (see LICENSE)
+vendored:
+  - include/jsoncons
+  - include/jsoncons_ext   (full extension set; jsonschema + jsonpointer are the ones used)
+verified-by: MANIFEST.sha256 (cmake/verify_manifest.cmake)

@@ -1,4 +1,4 @@
-// End-to-end loopback: a real McpServer and McpClient connected through two
+﻿// End-to-end loopback: a real McpServer and McpClient connected through two
 // anonymous pipes. No sleeps are used.
 
 #include <doctest/doctest.h>
@@ -32,6 +32,16 @@ using mcp::v1::ServerOptions;
 using mcp::v1::Status;
 using mcp::v1::StdioOptions;
 using mcp::v1::ToolDescriptor;
+
+namespace {
+ServerOptions permissiveServerOptions() {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  return options;
+}
+
+} // namespace
+
 using mcp::v1::ToolResult;
 using mcp::v1::makeStdioTransport;
 
@@ -90,7 +100,7 @@ TEST_CASE("client and server communicate over stdio pipes") {
   server_stdio.output = server_out;
   server_stdio.setBinaryMode = false;
 
-  McpServer server(ServerOptions{}, makeStdioTransport(server_stdio));
+  McpServer server(permissiveServerOptions(), makeStdioTransport(server_stdio));
   REQUIRE(server.tools().add(echoDescriptor(), std::make_shared<EchoHandler>()));
   std::thread server_thread([&server] { server.run(); });
 

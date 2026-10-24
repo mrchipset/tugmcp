@@ -9,7 +9,7 @@
 | 里程碑 | 状态 | 落地情况 |
 |---|---|---|
 | **M1** core + stdio | **已完成** | core 类型/错误模型/严格 JSON-RPC；stdio server + client；echo tool；真实管道 loopback；非法 JSON/EOF/超长行用例；默认构建 + vendored 哈希校验；unit 测试集 |
-| **M1.5** schema / canonical / conformance harness | 未开始 | 无 `schema/` 公共头；未引入 jsoncons/Valijson；无 JCS / `tool_schema_hash`；无 conformance runner |
+| **M1.5** schema / canonical / conformance harness | 部分 | 已完成：`ISchemaValidator` + jsoncons 1.10（2020-12）+ Valijson 1.1.3（draft-07）、fail-closed、canonical 子集、`tool_schema_hash`（含独立哈希锚点）、默认 OFF / ON 两套构建全绿。未完成：**conformance harness 未接**（`TUGMCP_CONFORMANCE` 仍 FATAL） |
 | **M2** 2026 server + client（HTTP/TLS） | 未开始 | `TUGMCP_WITH_HTTP`、`TUGMCP_TLS` 置 ON 即 `FATAL_ERROR` |
 | **M3** 2025 server/session | 未开始 | 仅有 `initialize` 子集；无 session / POST/GET/DELETE / per-stream replay |
 | **M4** 2025 client/replay | 未开始 | 客户端无 session、`Last-Event-ID` replay、server→client 请求处理、cancel 路由 |
@@ -23,8 +23,8 @@
 | §1–§3 目标 / 非目标 / 原则 | 已完成 | 设计文档已固化（含脱敏） |
 | §4 协议与传输矩阵 | 部分 | 仅 stdio；2026 只有 `server/discover` 骨架；无 HTTP / legacy |
 | §5 组件架构 | 部分 | `ITransport` / `ITimeSource` / server / client 已实现；**`IExecutor` 缺**；未拆 `IProtocolAdapter` |
-| §6 模块与目录 | 部分 | 公共头 11 个已就位；缺 `transport/http.hpp`、`detail/http_httplib.hpp`、`protocol/v2026.hpp`、`protocol/v2025.hpp`、`schema/*` |
-| §6.1 CMake targets | 部分 | 已有 `tugmcp::core`、`tugmcp::tests`；缺 `tugmcp::http`、`schema_jsoncons`、`schema_valijson` |
+| §6 模块与目录 | 部分 | 公共头 15 个（含 `schema.hpp`、`schema/{null,jsoncons,valijson}.hpp`、`canonical.hpp`）；缺 `transport/http.hpp`、`detail/http_httplib.hpp`、`protocol/v2026.hpp`、`protocol/v2025.hpp` |
+| §6.1 CMake targets | 部分 | 已有 `tugmcp::core`、`tugmcp::tests`、`tugmcp::schema_jsoncons`、`tugmcp::schema_valijson`；缺 `tugmcp::http` |
 | §7 核心类型与错误模型 | 已完成 | `RequestId`（int64 规范化 + 跨形态相等 + `std::hash`）、`McpError`/`Result`/`Status`、`ProtocolVersion`/`ProtocolEra`、`Message`；§7.3 的 `resultType` envelope 未做 |
 | §7.4 严格 JSON | 已完成 | UTF-8、任意层重复 key、深度上限、非有限数、batch 拒绝；含正例与负例矩阵 |
 | §8 并发模型 | 部分 | 单 reader + `send` 互斥；无执行器、队列、背压 |
@@ -36,7 +36,7 @@
 | §14 Server API | 部分 | `McpServer(options, transport)` / `run` / `stop` / `tools`；缺 `createExecutor`、resources/prompts/templates、auth/approve/audit hooks |
 | §15 Client API | 部分 | `connect` / `call` / `listTools` / `callTool` / `close`；缺 resources/prompts、cancel、progress、completion |
 | §16 线程 / 背压 / 关闭 | 部分 | 关闭顺序与 cv 收尾已实现；无队列背压、无跨线程取消路由 |
-| §17 schema / canonical JSON | 未开始 | — |
+| §17 schema / canonical JSON | 部分 | schema 可插拔（jsoncons/Valijson/Null）、fail-closed、canonical 子集、`tool_schema_hash` 已完成；conformance harness 未接 |
 | §18 安全 | 未开始 | 无 auth / approval / audit、无 Origin/Host/rate 限制 |
 | §19 测试与一致性 | 部分 | unit / integration / ODR 已有；conformance、覆盖率、完整矩阵未接 |
 | §20 构建 / 依赖 / ABI | 部分 | CMake + 静态库 + 2 个 vendored 依赖 + SHA256 校验；`HEADER_ONLY` / `USE_SYSTEM_DEPS` / TLS / install 未实现 |
@@ -50,7 +50,7 @@
 | 静态库（默认产物） | 已完成 | `tugmcp::core` 为 STATIC |
 | header-only 消费 | 未开始 | `TUGMCP_HEADER_ONLY=ON` → `FATAL_ERROR` |
 | OpenSSL 可选编译 | 未开始 | `TUGMCP_TLS` → `FATAL_ERROR` |
-| `3rd/` vendoring | 部分 | 仅 nlohmann/json 3.12.0 + doctest 2.5.3（SHA256 / 许可清单齐全）；cpp-httplib / jsoncons / Valijson 未引入 |
+| `3rd/` vendoring | 部分 | nlohmann/json 3.12.0、doctest 2.5.3（单头哈希）；jsoncons 1.10.0、Valijson 1.1.3（逐文件 `MANIFEST.sha256`，共 177+49 文件）；cpp-httplib 0.63.0 未引入 |
 | `TUGMCP_USE_SYSTEM_DEPS` | 未开始 | → `FATAL_ERROR` |
 | conformance 套件 | 未开始 | `TUGMCP_CONFORMANCE` → `FATAL_ERROR` |
 | examples | 部分 | 仅 `echo_server`；`echo_client` 未做 |

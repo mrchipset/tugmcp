@@ -16,12 +16,24 @@ add_executable(tugmcp_unit_tests
   unit/framing_test.cpp
   unit/registry_test.cpp
   unit/dispatcher_test.cpp
-  unit/client_test.cpp)
+  unit/client_test.cpp
+  unit/canonical_test.cpp
+  unit/schema_test.cpp)
 target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_unit_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 doctest_discover_tests(tugmcp_unit_tests TEST_PREFIX unit.
   PROPERTIES LABELS unit TIMEOUT 2 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+if(TUGMCP_WITH_JSONCONS)
+  target_sources(tugmcp_unit_tests PRIVATE unit/jsoncons_schema_test.cpp)
+  target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::schema_jsoncons)
+endif()
+
+if(TUGMCP_WITH_VALIJSON)
+  target_sources(tugmcp_unit_tests PRIVATE unit/valijson_schema_test.cpp)
+  target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::schema_valijson)
+endif()
 
 add_executable(tugmcp_odr_tests odr/main.cpp odr/tu_a.cpp odr/tu_b.cpp)
 target_link_libraries(tugmcp_odr_tests PRIVATE tugmcp::core tugmcp::tests)
