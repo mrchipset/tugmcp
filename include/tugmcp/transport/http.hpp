@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <tugmcp/request_context.hpp>
 #include <tugmcp/time_source.hpp>
@@ -60,6 +61,11 @@ struct StreamableHttpServerOptions {
   // uses timeSource (steady clock by default).
   std::size_t maxSessions = 128;
   std::chrono::milliseconds sessionTimeout{std::chrono::minutes(30)};
+  std::vector<std::string> supportedVersions{"2026-07-28",
+                                             "2025-11-25"};
+  // Host/Origin allowlists. Empty means loopback-only. Use "*" to allow any.
+  std::vector<std::string> allowedHosts;
+  std::vector<std::string> allowedOrigins;
 };
 
 class HttpServerTransport final : public ITransport {
@@ -79,6 +85,7 @@ public:
   void setOnSessionClosed(
       std::function<void(const std::string&)> handler) override;
   bool supportsStreaming() const override { return true; }
+  void setSupportedVersions(std::vector<std::string> versions) override;
   void close() override;
 
   int boundPort() const;

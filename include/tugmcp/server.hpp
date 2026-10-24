@@ -35,6 +35,7 @@ struct ServerOptions {
   // supported in this phase; each provider owns its namespace and pagination.
   std::shared_ptr<IResourceProvider> resources;
   std::shared_ptr<IPromptProvider> prompts;
+  std::shared_ptr<ICompletionProvider> completions;
 
   // Schema validation policy. With no validator and a tool that declares an
   // inputSchema, registration fails unless allowUnvalidatedTools is true.
@@ -84,6 +85,7 @@ public:
 private:
   struct SubscriptionState {
     SubscriptionId id;
+    Json subscriptionIdJson;
     std::string route;
     std::vector<ListKind> listChanged;
     std::unordered_set<std::string> resources;

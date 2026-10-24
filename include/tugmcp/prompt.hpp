@@ -28,6 +28,13 @@ struct PromptResult {
 
 using PromptOutcome = OperationOutcome<PromptResult>;
 
+class ICompletionProvider {
+public:
+  virtual ~ICompletionProvider() = default;
+  virtual Result<Json> complete(const Json& ref, const Json& argument,
+                              RequestContext& context) = 0;
+};
+
 class IPromptProvider {
 public:
   virtual ~IPromptProvider() = default;

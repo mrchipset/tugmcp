@@ -622,7 +622,7 @@ TEST_CASE("cancelling one call keeps subscriptions and other calls alive") {
   REQUIRE(client.connect().ok);
 
   mcp::v1::SubscriptionFilter filter;
-  filter.resources = {"mem://keep"};
+  filter.listChanged = {mcp::v1::ListKind::Tools};
   std::promise<void> notified;
   auto notified_future = notified.get_future();
   auto subscription = client.subscribe(filter, [&](const Json&) {
@@ -655,7 +655,7 @@ TEST_CASE("cancelling one call keeps subscriptions and other calls alive") {
   CHECK(slow_outcome->error().data.at("reason") == "cancelled");
   slow_release.set_value();
 
-  running.server().notifyResourceUpdated("mem://keep");
+  running.server().notifyListChanged(mcp::v1::ListKind::Tools);
   notified_future.wait();
 
   client.close();

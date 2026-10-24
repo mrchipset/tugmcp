@@ -45,6 +45,84 @@ bool hasProgressToken(const Message& message) {
          message.params.at("_meta").contains("progressToken");
 }
 
+std::string asciiLower(std::string value) {
+  for (char& character : value) {
+    character = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(character)));
+  }
+  return value;
+}
+
+std::string hostFromAuthority(const std::string& authority) {
+  if (authority.empty()) {
+    return {};
+  }
+  if (authority.front() == '[') {
+    const std::size_t end = authority.find(']');
+    if (end == std::string::npos) {
+      return asciiLower(authority);
+    }
+    return asciiLower(authority.substr(1, end - 1));
+  }
+  const std::size_t colon = authority.rfind(':');
+  if (colon != std::string::npos &&
+      authority.find(':') == colon) {
+    return asciiLower(authority.substr(0, colon));
+  }
+  return asciiLower(authority);
+}
+
+bool isLoopbackHost(const std::string& host) {
+  return host == "127.0.0.1" || host == "localhost" || host == "::1";
+}
+
+bool listMatches(const std::vector<std::string>& list,
+                 const std::string& value) {
+  const std::string candidate = asciiLower(value);
+  for (const auto& item : list) {
+    if (item == "*" || asciiLower(item) == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hostAllowed(const std::string& host_header,
+                 const std::vector<std::string>& allowed_hosts) {
+  if (host_header.empty()) {
+    return false;
+  }
+  const std::string host = hostFromAuthority(host_header);
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  return listMatches(allowed_hosts, host);
+}
+
+bool originAllowed(const std::string& origin,
+                   const std::vector<std::string>& allowed_origins) {
+  if (origin.empty()) {
+    return true;
+  }
+  if (origin == "null") {
+    return false;
+  }
+  const std::size_t scheme_end = origin.find("://");
+  const std::string authority =
+      scheme_end == std::string::npos
+          ? origin
+          : origin.substr(scheme_end + 3);
+  const std::size_t path = authority.find('/');
+  const std::string host =
+      hostFromAuthority(path == std::string::npos
+                            ? authority
+                            : authority.substr(0, path));
+  if (isLoopbackHost(host)) {
+    return true;
+  }
+  return listMatches(allowed_origins, origin);
+}
+
 #if TUGMCP_TLS_ENABLED
 bool isReadableFile(const std::string& path) {
   std::ifstream stream(path, std::ios::binary);
@@ -64,7 +142,25 @@ Result<std::shared_ptr<ITransport>> optionFailure(const char* reason,
 class HttpServerTransport::Impl {
 public:
   explicit Impl(StreamableHttpServerOptions options)
-      : options_(std::move(options)) {}
+      : options_(std::move(options)),
+        supported_versions_(options_.supportedVersions) {}
+
+  void setSupportedVersions(std::vector<std::string> versions) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    supported_versions_ = std::move(versions);
+  }
+
+  bool isSupportedVersion(const std::string& version) const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return std::find(supported_versions_.begin(),
+                     supported_versions_.end(),
+                     version) != supported_versions_.end();
+  }
+
+  std::vector<std::string> supportedVersions() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return supported_versions_;
+  }
 
   ~Impl() { close(); }
 
@@ -645,6 +741,13 @@ private:
   void handleGet(const httplib::Request& request,
                  httplib::Response& response) {
     try {
+      if (!hostAllowed(request.get_header_value("Host"),
+                       options_.allowedHosts) ||
+          !originAllowed(request.get_header_value("Origin"),
+                         options_.allowedOrigins)) {
+        response.status = 403;
+        return;
+      }
       const std::string version =
           request.get_header_value("MCP-Protocol-Version");
       if (version == "2026-07-28") {
@@ -758,6 +861,13 @@ private:
   void handleDelete(const httplib::Request& request,
                     httplib::Response& response) {
     try {
+      if (!hostAllowed(request.get_header_value("Host"),
+                       options_.allowedHosts) ||
+          !originAllowed(request.get_header_value("Origin"),
+                         options_.allowedOrigins)) {
+        response.status = 403;
+        return;
+      }
       const std::string version =
           request.get_header_value("MCP-Protocol-Version");
       if (version == "2026-07-28") {
@@ -1104,6 +1214,14 @@ private:
   void handlePost(const httplib::Request& request,
                   httplib::Response& response) {
     try {
+      if (!hostAllowed(request.get_header_value("Host"),
+                       options_.allowedHosts) ||
+          !originAllowed(request.get_header_value("Origin"),
+                         options_.allowedOrigins)) {
+        response.status = 403;
+        return;
+      }
+
       const std::string content_type =
           request.get_header_value("Content-Type");
       if (!isJsonContentType(content_type)) {
@@ -1118,14 +1236,6 @@ private:
 
       const std::string version =
           request.get_header_value("MCP-Protocol-Version");
-      if (!version.empty() && version != "2025-11-25" &&
-          version != "2026-07-28") {
-        respondError(response, 400,
-                     McpError::make(ErrorCode::UnsupportedVersion,
-                                    "unsupported protocol version: " +
-                                        version));
-        return;
-      }
 
       auto decoded = decode(request.body);
       if (!decoded.hasValue()) {
@@ -1136,14 +1246,61 @@ private:
       const Message& message = decoded.value();
       const bool is_2025 =
           version.empty() || version == "2025-11-25";
+      const std::string resolved_version =
+          version.empty() ? std::string("2025-11-25") : version;
+      if (!isSupportedVersion(resolved_version)) {
+        respondError(response, 400,
+                     McpError::make(
+                         ErrorCode::UnsupportedVersion,
+                         "unsupported protocol version: " + version,
+                         Json{{"requested", version},
+                              {"supported", supportedVersions()}}),
+                     message.id.toJson());
+        return;
+      }
       if (message.kind == MessageKind::Response && !is_2025) {
         respondError(response, 400,
                      McpError::make(ErrorCode::InvalidRequest,
-                                    "response is not a request"));
+                                    "response is not a request"),
+                     message.id.toJson());
         return;
       }
 
       if (version == "2026-07-28") {
+        if (!message.params.is_object() ||
+            !message.params.contains("_meta") ||
+            !message.params.at("_meta").is_object()) {
+          respondError(response, 400,
+                       McpError::make(
+                           ErrorCode::InvalidParams,
+                           "2026 requests require params._meta"),
+                       message.id.toJson());
+          return;
+        }
+        const Json& meta = message.params.at("_meta");
+        if (!meta.contains("io.modelcontextprotocol/protocolVersion") ||
+            !meta.at("io.modelcontextprotocol/protocolVersion")
+                 .is_string() ||
+            !meta.contains(
+                "io.modelcontextprotocol/clientCapabilities") ||
+            !meta.at("io.modelcontextprotocol/clientCapabilities")
+                 .is_object()) {
+          respondError(response, 400,
+                       McpError::make(
+                           ErrorCode::InvalidParams,
+                           "params._meta is missing required 2026 fields"),
+                       message.id.toJson());
+          return;
+        }
+        if (meta.at("io.modelcontextprotocol/protocolVersion")
+                .get<std::string>() != version) {
+          respondError(response, 400,
+                       McpError::make(
+                           ErrorCode::HeaderMismatch,
+                           "params._meta protocolVersion mismatch"),
+                       message.id.toJson());
+          return;
+        }
         if (request.get_header_value("Mcp-Method") != message.method) {
           respondError(response, 400,
                        McpError::make(ErrorCode::HeaderMismatch,
@@ -1189,22 +1346,6 @@ private:
         }
         if (!findSession(session_id)) {
           response.status = 404;
-          return;
-        }
-      }
-
-      if (version == "2026-07-28" && message.params.is_object() &&
-          message.params.contains("_meta") &&
-          message.params.at("_meta").is_object() &&
-          message.params.at("_meta").contains("protocolVersion")) {
-        const Json& meta_version =
-            message.params.at("_meta").at("protocolVersion");
-        if (!meta_version.is_string() ||
-            meta_version.get<std::string>() != version) {
-          respondError(response, 400,
-                       McpError::make(ErrorCode::HeaderMismatch,
-                                      "_meta.protocolVersion mismatch"),
-                       message.id.toJson());
           return;
         }
       }
@@ -1411,7 +1552,20 @@ private:
         response.set_header("MCP-Session-Id", session->id);
       }
 
-      respondJson(response, 200, body);
+      int response_status = 200;
+      if (version == "2026-07-28" && body.is_object() &&
+          body.contains("error") && body.at("error").is_object() &&
+          body.at("error").contains("code") &&
+          body.at("error").at("code").is_number_integer()) {
+        const int code = body.at("error").at("code").get<int>();
+        if (code == -32601) {
+          response_status = 404;
+        } else if (code == -32602 || code == -32020 ||
+                   code == -32021 || code == -32022) {
+          response_status = 400;
+        }
+      }
+      respondJson(response, response_status, body);
     } catch (...) {
       respondError(response, 500,
                    McpError::make(ErrorCode::InternalError,
@@ -1422,7 +1576,8 @@ private:
   StreamableHttpServerOptions options_;
   std::unique_ptr<httplib::Server> server_;
 
-  std::mutex lifecycle_mutex_;
+  mutable std::mutex lifecycle_mutex_;
+  std::vector<std::string> supported_versions_;
   bool started_ = false;
   std::thread listen_thread_;
   std::atomic<int> bound_port_{0};
@@ -1492,6 +1647,11 @@ void HttpServerTransport::setOnClose(std::function<void()> handler) {
 void HttpServerTransport::setOnRouteClosed(
     std::function<void(const std::string&)> handler) {
   impl_->setOnRouteClosed(std::move(handler));
+}
+
+void HttpServerTransport::setSupportedVersions(
+    std::vector<std::string> versions) {
+  impl_->setSupportedVersions(std::move(versions));
 }
 
 void HttpServerTransport::setOnSessionClosed(

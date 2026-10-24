@@ -37,6 +37,8 @@ struct RequestContext {
   std::shared_ptr<CancellationToken> cancellation;
   Json inputResponses;
   std::optional<std::string> requestState;
+  Json clientCapabilities;
+  std::optional<RequestId> subscriptionId;
 };
 
 } // namespace v1

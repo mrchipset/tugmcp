@@ -170,7 +170,7 @@ TEST_CASE("subscription resource updates are routed by uri and id") {
   REQUIRE(client.connect().ok);
 
   SubscriptionFilter filter;
-  filter.resources = {"mem://a"};
+  filter.listChanged = {ListKind::Tools};
 
   std::mutex events_mutex;
   std::vector<Json> events;
@@ -190,18 +190,19 @@ TEST_CASE("subscription resource updates are routed by uri and id") {
   REQUIRE(received.hasValue());
   const SubscriptionId subscription_id = received.value();
 
-  running.server().notifyResourceUpdated("mem://b");
-  running.server().notifyResourceUpdated("mem://a");
+  running.server().notifyListChanged(ListKind::Prompts);
+  running.server().notifyListChanged(ListKind::Tools);
   first_event_future.wait();
 
   {
     std::lock_guard<std::mutex> lock(events_mutex);
     REQUIRE(events.size() == 1);
     CHECK(events.at(0).at("method") ==
-          "notifications/resources/updated");
-    CHECK(events.at(0).at("params").at("uri") == "mem://a");
-    CHECK(events.at(0).at("params").at("subscriptionId") ==
-          subscription_id);
+          "notifications/tools/list_changed");
+    CHECK(events.at(0).at("params")
+              .at("_meta")
+              .at("io.modelcontextprotocol/subscriptionId")
+              .dump() == subscription_id);
   }
 
   client.close();
@@ -246,8 +247,10 @@ TEST_CASE("subscription listChanged filters by kind") {
     REQUIRE(events.size() == 1);
     CHECK(events.at(0).at("method") ==
           "notifications/tools/list_changed");
-    CHECK(events.at(0).at("params").at("subscriptionId") ==
-          received.value());
+    CHECK(events.at(0).at("params")
+              .at("_meta")
+              .at("io.modelcontextprotocol/subscriptionId")
+              .dump() == received.value());
   }
 
   client.close();
@@ -271,7 +274,7 @@ TEST_CASE("unsubscribe stops delivery and is idempotently unknown") {
   };
 
   SubscriptionFilter first_filter;
-  first_filter.resources = {"mem://a"};
+  first_filter.listChanged = {ListKind::Tools};
   auto first = client.subscribe(first_filter, record);
   REQUIRE(first.hasValue());
   REQUIRE(client.unsubscribe(first.value()).ok);
@@ -279,7 +282,7 @@ TEST_CASE("unsubscribe stops delivery and is idempotently unknown") {
   std::promise<void> second_event;
   auto second_event_future = second_event.get_future();
   SubscriptionFilter second_filter;
-  second_filter.resources = {"mem://b"};
+  second_filter.listChanged = {ListKind::Tools};
   auto second = client.subscribe(second_filter, [&](const Json& notification) {
     record(notification);
     try {
@@ -289,14 +292,14 @@ TEST_CASE("unsubscribe stops delivery and is idempotently unknown") {
   });
   REQUIRE(second.hasValue());
 
-  running.server().notifyResourceUpdated("mem://a");
-  running.server().notifyResourceUpdated("mem://b");
+  running.server().notifyListChanged(ListKind::Tools);
   second_event_future.wait();
 
   {
     std::lock_guard<std::mutex> lock(events_mutex);
     REQUIRE(events.size() == 1);
-    CHECK(events.at(0).at("params").at("uri") == "mem://b");
+    CHECK(events.at(0).at("method") ==
+          "notifications/tools/list_changed");
   }
 
   auto second_unsubscribe = client.unsubscribe(first.value());
@@ -318,7 +321,7 @@ TEST_CASE("invalid subscription filters return InvalidParams") {
   REQUIRE(client.connect().ok);
 
   SubscriptionFilter filter;
-  filter.listChanged = {static_cast<ListKind>(999)};
+  filter.resources = {"mem://a"};
   auto subscribed = client.subscribe(filter, [](const Json&) {});
   REQUIRE_FALSE(subscribed.hasValue());
   CHECK(static_cast<int>(subscribed.error().code) == -32602);
@@ -381,7 +384,7 @@ TEST_CASE("server stop closes an open subscription without hanging") {
   REQUIRE(client.connect().ok);
 
   SubscriptionFilter filter;
-  filter.resources = {"mem://a"};
+  filter.listChanged = {ListKind::Tools};
   auto subscribed = client.subscribe(filter, [](const Json&) {});
   REQUIRE(subscribed.hasValue());
 
@@ -398,7 +401,7 @@ TEST_CASE("server drops a subscription when the client stream closes") {
   REQUIRE(client.connect().ok);
 
   SubscriptionFilter filter;
-  filter.resources = {"mem://a"};
+  filter.listChanged = {ListKind::Tools};
   auto subscribed = client.subscribe(filter, [](const Json&) {});
   REQUIRE(subscribed.hasValue());
 

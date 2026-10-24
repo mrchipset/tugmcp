@@ -48,6 +48,34 @@ std::string baseUrlFor(int port) {
   return "http://127.0.0.1:" + std::to_string(port);
 }
 
+httplib::Headers sessionHeaders(const std::string& session_id) {
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("MCP-Session-Id", session_id);
+  headers.emplace("Accept", "application/json");
+  return headers;
+}
+
+std::string initializeSession(int port) {
+  httplib::Client client(baseUrlFor(port));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("Accept", "application/json");
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 1},
+           {"method", "initialize"},
+           {"params", Json{{"protocolVersion", "2025-11-25"}}}};
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  REQUIRE(response->status == 200);
+  const std::string id = response->get_header_value("MCP-Session-Id");
+  REQUIRE_FALSE(id.empty());
+  client.stop();
+  return id;
+}
+
 class ReadyTransport final : public ITransport {
 public:
   explicit ReadyTransport(std::shared_ptr<ITransport> inner)
@@ -105,7 +133,7 @@ private:
 class RunningServer {
 public:
   RunningServer(StreamableHttpServerOptions http_options,
-                ServerOptions core_options) {
+                ServerOptions core_options = {}) {
     auto created = makeStreamableHttpServerTransport(http_options);
     REQUIRE(created.hasValue());
     concrete_ = std::dynamic_pointer_cast<HttpServerTransport>(created.value());
@@ -215,9 +243,14 @@ Json toolCallBody(std::string name, Json arguments, std::int64_t id,
   Json params;
   params["name"] = std::move(name);
   params["arguments"] = std::move(arguments);
+  Json meta = Json{{"io.modelcontextprotocol/protocolVersion",
+                    "2026-07-28"},
+                   {"io.modelcontextprotocol/clientCapabilities",
+                    Json::object()}};
   if (!progress_token.empty()) {
-    params["_meta"] = Json{{"progressToken", progress_token}};
+    meta["progressToken"] = progress_token;
   }
+  params["_meta"] = std::move(meta);
   return Json{{"jsonrpc", "2.0"},
               {"id", id},
               {"method", "tools/call"},
@@ -385,9 +418,9 @@ TEST_CASE("admission rejection returns HTTP 429") {
 
   httplib::Client client(baseUrlFor(running.port()));
   const Json body =
-      Json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "ping"}, {"params", Json::object()}};
+      Json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}, {"params", Json{{"_meta", Json{{"io.modelcontextprotocol/protocolVersion", "2026-07-28"}, {"io.modelcontextprotocol/clientCapabilities", Json::object()}}}}}};
   auto response =
-      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(), "application/json");
+      client.Post("/mcp", jsonHeaders("tools/list", ""), body.dump(), "application/json");
   REQUIRE(response);
   CHECK(response->status == 429);
 
@@ -404,9 +437,9 @@ TEST_CASE("admission acceptance lets the request through") {
 
   httplib::Client client(baseUrlFor(running.port()));
   const Json body =
-      Json{{"jsonrpc", "2.0"}, {"id", 2}, {"method", "ping"}, {"params", Json::object()}};
+      Json{{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}, {"params", Json{{"_meta", Json{{"io.modelcontextprotocol/protocolVersion", "2026-07-28"}, {"io.modelcontextprotocol/clientCapabilities", Json::object()}}}}}};
   auto response =
-      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(), "application/json");
+      client.Post("/mcp", jsonHeaders("tools/list", ""), body.dump(), "application/json");
   REQUIRE(response);
   CHECK(response->status == 200);
   CHECK(Json::parse(response->body).at("id") == 2);
@@ -584,9 +617,13 @@ TEST_CASE("2026 _meta.protocolVersion must match the header") {
            {"id", 91},
            {"method", "ping"},
            {"params",
-            Json{{"_meta", Json{{"protocolVersion", "2025-11-25"}}}}}};
+            Json{{"_meta",
+                  Json{{"io.modelcontextprotocol/protocolVersion",
+                        "2025-11-25"},
+                       {"io.modelcontextprotocol/clientCapabilities",
+                        Json::object()}}}}}};
   auto response =
-      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(),
+      client.Post("/mcp", jsonHeaders("tools/list", ""), body.dump(),
                   "application/json");
   REQUIRE(response);
   CHECK(response->status == 400);
@@ -609,14 +646,160 @@ TEST_CASE("emergency admission posts with Emergency priority") {
   httplib::Client client(baseUrlFor(running.port()));
   const Json body = Json{{"jsonrpc", "2.0"},
                          {"id", 95},
-                         {"method", "ping"},
-                         {"params", Json::object()}};
+                         {"method", "tools/list"},
+                         {"params",
+                          Json{{"_meta",
+                                Json{{"io.modelcontextprotocol/protocolVersion",
+                                      "2026-07-28"},
+                                     {"io.modelcontextprotocol/"
+                                      "clientCapabilities",
+                                      Json::object()}}}}}};
   auto response =
-      client.Post("/mcp", jsonHeaders("ping", ""), body.dump(),
+      client.Post("/mcp", jsonHeaders("tools/list", ""), body.dump(),
                   "application/json");
   REQUIRE(response);
   CHECK(response->status == 200);
   CHECK(executor->saw(mcp::v1::Priority::Emergency));
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("2026 missing _meta returns 400 InvalidParams with the id") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json body = Json{{"jsonrpc", "2.0"},
+                         {"id", 8},
+                         {"method", "tools/list"},
+                         {"params", Json::object()}};
+  auto response = client.Post("/mcp", jsonHeaders("tools/list", ""),
+                              body.dump(), "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 400);
+  const Json error = Json::parse(response->body);
+  CHECK(error.at("id") == 8);
+  CHECK(error.at("error").at("code") == -32602);
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("2026 removed methods return 404 MethodNotFound with the id") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const std::vector<std::string> methods = {
+      "initialize", "ping", "logging/setLevel", "resources/subscribe",
+      "resources/unsubscribe", "unknown/method"};
+  for (std::size_t index = 0; index < methods.size(); ++index) {
+    const Json body =
+        Json{{"jsonrpc", "2.0"},
+             {"id", 100 + static_cast<int>(index)},
+             {"method", methods[index]},
+             {"params",
+              Json{{"_meta",
+                    Json{{"io.modelcontextprotocol/protocolVersion",
+                          "2026-07-28"},
+                         {"io.modelcontextprotocol/clientCapabilities",
+                          Json::object()}}}}}};
+    auto response = client.Post("/mcp",
+                                jsonHeaders(methods[index], ""),
+                                body.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 404);
+    const Json error = Json::parse(response->body);
+    CHECK(error.at("id") == 100 + static_cast<int>(index));
+    CHECK(error.at("error").at("code") == -32601);
+  }
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("unsupported version reports requested and supported") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "1999-01-01");
+  headers.emplace("Mcp-Method", "tools/list");
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 9},
+           {"method", "tools/list"},
+           {"params",
+            Json{{"_meta",
+                  Json{{"io.modelcontextprotocol/protocolVersion",
+                        "1999-01-01"},
+                       {"io.modelcontextprotocol/clientCapabilities",
+                        Json::object()}}}}}};
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 400);
+  const Json error = Json::parse(response->body);
+  CHECK(error.at("id") == 9);
+  CHECK(error.at("error").at("code") == -32022);
+  CHECK(error.at("error").at("data").at("requested") == "1999-01-01");
+  CHECK(error.at("error").at("data").at("supported").is_array());
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("Host and Origin rebinding attempts return 403") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 10},
+           {"method", "tools/list"},
+           {"params",
+            Json{{"_meta",
+                  Json{{"io.modelcontextprotocol/protocolVersion",
+                        "2026-07-28"},
+                       {"io.modelcontextprotocol/clientCapabilities",
+                        Json::object()}}}}}};
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers = jsonHeaders("tools/list", "");
+  headers.emplace("Host", "evil.example.com");
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 403);
+
+  headers = jsonHeaders("tools/list", "");
+  headers.emplace("Origin", "null");
+  auto origin_response = client.Post("/mcp", headers, body.dump(),
+                                     "application/json");
+  REQUIRE(origin_response);
+  CHECK(origin_response->status == 403);
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("2025 unknown methods still return HTTP 200") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+  const std::string session_id = initializeSession(running.port());
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers = sessionHeaders(session_id);
+  const Json body = Json{{"jsonrpc", "2.0"},
+                         {"id", 11},
+                         {"method", "unknown/method"},
+                         {"params", Json::object()}};
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 200);
+  const Json error = Json::parse(response->body);
+  CHECK(error.at("error").at("code") == -32601);
 
   client.stop();
   running.stop();

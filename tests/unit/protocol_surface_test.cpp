@@ -19,6 +19,7 @@ using mcp::v1::Dispatcher;
 using mcp::v1::DispatchConfig;
 using mcp::v1::ErrorCode;
 using mcp::v1::InputRequired;
+using mcp::v1::ICompletionProvider;
 using mcp::v1::IProgressSink;
 using mcp::v1::IPromptProvider;
 using mcp::v1::IResourceProvider;
@@ -87,6 +88,20 @@ Message request(std::string method, Json params = nullptr,
   message.kind = MessageKind::Request;
   message.method = std::move(method);
   message.params = std::move(params);
+  if (!message.params.is_object()) {
+    message.params = Json::object();
+  }
+  if (!message.params.contains("_meta") ||
+      !message.params.at("_meta").is_object()) {
+    message.params["_meta"] = Json::object();
+  }
+  Json& meta = message.params["_meta"];
+  if (!meta.contains("io.modelcontextprotocol/protocolVersion")) {
+    meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28";
+  }
+  if (!meta.contains("io.modelcontextprotocol/clientCapabilities")) {
+    meta["io.modelcontextprotocol/clientCapabilities"] = Json::object();
+  }
   message.id.value = id;
   return message;
 }
@@ -157,12 +172,19 @@ TEST_CASE("protocol surface: initialize negotiates and rejects versions") {
   config.serverVersion = "1.2.3";
   auto dispatcher = makeDispatcher(registry, nullptr, nullptr, config);
 
+  auto removed = dispatcher.dispatch(request("initialize"), kV2026);
+  REQUIRE(removed.has_value());
+  REQUIRE(removed->error.has_value());
+  CHECK(static_cast<int>(removed->error->code) ==
+        static_cast<int>(ErrorCode::MethodNotFound));
+
   auto response = dispatcher.dispatch(
-      request("initialize", Json{{"protocolVersion", "2026-07-28"}}), kV2026);
+      request("initialize", Json{{"protocolVersion", "2025-11-25"}}), kV2025);
   REQUIRE(response.has_value());
   REQUIRE_FALSE(response->error.has_value());
-  CHECK(response->result.at("protocolVersion") == "2026-07-28");
+  CHECK(response->result.at("protocolVersion") == "2025-11-25");
   CHECK(response->result.at("capabilities").at("tools").is_object());
+  CHECK(response->result.at("capabilities").contains("completions"));
   CHECK(response->result.at("serverInfo").at("name") == "surface");
   CHECK(response->result.at("serverInfo").at("version") == "1.2.3");
 
@@ -209,11 +231,15 @@ TEST_CASE("protocol surface: discover and ping carry resultType in 2026") {
   CHECK(discover->result.at("capabilities").at("tools").at("listChanged") ==
         true);
   CHECK(discover->result.at("capabilities").contains("subscriptions"));
+  CHECK(discover->result.at("_meta")
+            .at("io.modelcontextprotocol/serverInfo")
+            .at("name") == "tugmcp");
 
   auto ping = dispatcher.dispatch(request("ping"), kV2026);
   REQUIRE(ping.has_value());
-  REQUIRE_FALSE(ping->error.has_value());
-  CHECK(ping->result.at("resultType") == "complete");
+  REQUIRE(ping->error.has_value());
+  CHECK(static_cast<int>(ping->error->code) ==
+        static_cast<int>(ErrorCode::MethodNotFound));
 
   auto legacy_discover =
       dispatcher.dispatch(request("server/discover"), kV2025);
@@ -733,4 +759,94 @@ TEST_CASE("protocol surface: image/audio require data and mimeType") {
   REQUIRE(response.has_value());
   REQUIRE(response->error.has_value());
   CHECK(response->error->data.at("reason") == "invalid_content_block");
+}
+TEST_CASE("protocol surface: 2026 requires namespaced _meta") {
+  ToolRegistry registry;
+  auto dispatcher = makeDispatcher(registry);
+
+  Message missing;
+  missing.kind = MessageKind::Request;
+  missing.method = "tools/list";
+  missing.params = Json::object();
+  missing.id.value = 1;
+  auto response = dispatcher.dispatch(missing, kV2026);
+  REQUIRE(response.has_value());
+  REQUIRE(response->error.has_value());
+  CHECK(static_cast<int>(response->error->code) ==
+        static_cast<int>(ErrorCode::InvalidParams));
+
+  Message typed;
+  typed.kind = MessageKind::Request;
+  typed.method = "tools/list";
+  typed.params =
+      Json{{"_meta",
+            Json{{"io.modelcontextprotocol/protocolVersion", 1},
+                 {"io.modelcontextprotocol/clientCapabilities",
+                  Json::object()}}}};
+  typed.id.value = 2;
+  auto typed_response = dispatcher.dispatch(typed, kV2026);
+  REQUIRE(typed_response.has_value());
+  REQUIRE(typed_response->error.has_value());
+  CHECK(static_cast<int>(typed_response->error->code) ==
+        static_cast<int>(ErrorCode::InvalidParams));
+}
+
+TEST_CASE("protocol surface: client capabilities reach RequestContext") {
+  ToolRegistry registry;
+  Json seen = nullptr;
+  addTool(registry, "caps", [&seen](const Json&, RequestContext& context,
+                                    IProgressSink&) {
+    seen = context.clientCapabilities;
+    return completeText("ok");
+  });
+  auto dispatcher = makeDispatcher(registry);
+  Message message = request("tools/call",
+                            Json{{"name", "caps"},
+                                 {"arguments", Json::object()}});
+  message.params["_meta"]["io.modelcontextprotocol/clientCapabilities"] =
+      Json{{"roots", Json::object()}};
+  auto response = dispatcher.dispatch(message, kV2026);
+  REQUIRE(response.has_value());
+  REQUIRE_FALSE(response->error.has_value());
+  CHECK(seen.at("roots").is_object());
+}
+
+namespace {
+
+class FakeCompletion final : public ICompletionProvider {
+public:
+  Result<Json> complete(const Json&, const Json& argument,
+                        RequestContext&) override {
+    return Json{{"values", Json::array({argument.at("value").get<std::string>() +
+                                        "-suffix"})}};
+  }
+};
+
+} // namespace
+
+TEST_CASE("protocol surface: completion provider and empty default") {
+  ToolRegistry registry;
+  DispatchConfig config;
+  FakeCompletion provider;
+  config.completions = &provider;
+  auto dispatcher = makeDispatcher(registry, nullptr, nullptr, config);
+
+  const Json params =
+      Json{{"ref", Json{{"type", "ref/prompt"}, {"name", "greet"}}},
+           {"argument", Json{{"name", "who"}, {"value", "ada"}}}};
+  auto response = dispatcher.dispatch(request("completion/complete", params),
+                                      kV2026);
+  REQUIRE(response.has_value());
+  REQUIRE_FALSE(response->error.has_value());
+  CHECK(response->result.at("completion").at("values").at(0) ==
+        "ada-suffix");
+  CHECK(response->result.at("resultType") == "complete");
+
+  auto empty_dispatcher = makeDispatcher(registry);
+  auto empty = empty_dispatcher.dispatch(
+      request("completion/complete", params), kV2026);
+  REQUIRE(empty.has_value());
+  REQUIRE_FALSE(empty->error.has_value());
+  CHECK(empty->result.at("completion").at("values").is_array());
+  CHECK(empty->result.at("completion").at("values").empty());
 }

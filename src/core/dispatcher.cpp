@@ -25,6 +25,14 @@ namespace {
 
 constexpr const char* kWire2026 = "2026-07-28";
 constexpr const char* kWire2025 = "2025-11-25";
+constexpr const char* kMetaProtocolVersion =
+    "io.modelcontextprotocol/protocolVersion";
+constexpr const char* kMetaClientCapabilities =
+    "io.modelcontextprotocol/clientCapabilities";
+constexpr const char* kMetaClientInfo =
+    "io.modelcontextprotocol/clientInfo";
+constexpr const char* kMetaServerInfo =
+    "io.modelcontextprotocol/serverInfo";
 
 Json serverInfo(const DispatchConfig& config) {
   Json info;
@@ -50,12 +58,48 @@ Json capabilities(const DispatchConfig& config,
   if (prompts != nullptr) {
     value["prompts"] = Json{{"listChanged", true}};
   }
+  value["completions"] = Json::object();
   if (is2026 && config.supportsSubscriptions) {
     value["subscriptions"] = Json::object();
   }
   return value;
 }
 
+Result<Json> validateRequestMeta(const Message& request,
+                                 const std::string& version) {
+  if (!request.params.is_object() || !request.params.contains("_meta") ||
+      !request.params.at("_meta").is_object()) {
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::InvalidParams, "2026 requests require params._meta"));
+  }
+  const Json& meta = request.params.at("_meta");
+  if (!meta.contains(kMetaProtocolVersion) ||
+      !meta.at(kMetaProtocolVersion).is_string()) {
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::InvalidParams,
+        "params._meta requires a string protocolVersion"));
+  }
+  if (!meta.contains(kMetaClientCapabilities) ||
+      !meta.at(kMetaClientCapabilities).is_object()) {
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::InvalidParams,
+        "params._meta requires an object clientCapabilities"));
+  }
+  if (meta.at(kMetaProtocolVersion).get<std::string>() != version) {
+    return Result<Json>::failure(McpError::make(
+        ErrorCode::HeaderMismatch,
+        "params._meta protocolVersion does not match the request version",
+        Json{{"reason", "meta_version_mismatch"}}));
+  }
+  return meta.at(kMetaClientCapabilities);
+}
+
+bool isRemoved2026Method(const std::string& method) {
+  return method == "initialize" || method == "ping" ||
+         method == "logging/setLevel" ||
+         method == "resources/subscribe" ||
+         method == "resources/unsubscribe";
+}
 Json descriptorToJson(const ToolDescriptor& descriptor) {
   Json value;
   value["name"] = descriptor.name;
@@ -290,12 +334,14 @@ private:
 };
 
 RequestContext makeContext(const Message& request,
-                           const std::shared_ptr<CancellationToken>& token) {
+                           const std::shared_ptr<CancellationToken>& token,
+                           const Json& client_capabilities = Json()) {
   RequestContext context;
   context.id = request.id;
   context.method = request.method;
   context.cancellation =
       token ? token : std::make_shared<CancellationToken>();
+  context.clientCapabilities = client_capabilities;
   return context;
 }
 
@@ -349,7 +395,8 @@ Result<Json> toolResultToJson(const ToolResult& result, bool is2026) {
 
 Result<Json> callTool(ToolRegistry& registry, const Message& request,
                       bool is2026, const NotificationSink& notify,
-                      const std::shared_ptr<CancellationToken>& token) {
+                      const std::shared_ptr<CancellationToken>& token,
+                      const Json& client_capabilities) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "tools/call params must be an object"));
@@ -392,7 +439,7 @@ Result<Json> callTool(ToolRegistry& registry, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token);
+  RequestContext context = makeContext(request, token, client_capabilities);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -519,8 +566,9 @@ Result<Json> pageToJson(const Page<T>& page, bool is2026,
 Result<Json> listResources(IResourceProvider& provider,
                            const Message& request, const Json& cursor,
                            bool is2026,
-                           const std::shared_ptr<CancellationToken>& token) {
-  RequestContext context = makeContext(request, token);
+                           const std::shared_ptr<CancellationToken>& token,
+                           const Json& client_capabilities) {
+  RequestContext context = makeContext(request, token, client_capabilities);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -534,8 +582,9 @@ Result<Json> listResources(IResourceProvider& provider,
 Result<Json> listResourceTemplates(IResourceProvider& provider,
                                    const Message& request, const Json& cursor,
                                    bool is2026,
-                                   const std::shared_ptr<CancellationToken>& token) {
-  RequestContext context = makeContext(request, token);
+                                   const std::shared_ptr<CancellationToken>& token,
+                                   const Json& client_capabilities) {
+  RequestContext context = makeContext(request, token, client_capabilities);
   auto page = provider.templates(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -549,8 +598,9 @@ Result<Json> listResourceTemplates(IResourceProvider& provider,
 Result<Json> listPrompts(IPromptProvider& provider,
                          const Message& request, const Json& cursor,
                          bool is2026,
-                         const std::shared_ptr<CancellationToken>& token) {
-  RequestContext context = makeContext(request, token);
+                         const std::shared_ptr<CancellationToken>& token,
+                         const Json& client_capabilities) {
+  RequestContext context = makeContext(request, token, client_capabilities);
   auto page = provider.list(ListParams{cursor}, context);
   if (!page.hasValue()) {
     return Result<Json>::failure(page.error());
@@ -563,7 +613,8 @@ Result<Json> listPrompts(IPromptProvider& provider,
 
 Result<Json> readResource(IResourceProvider& provider,
                           const Message& request, bool is2026,
-                          const std::shared_ptr<CancellationToken>& token) {
+                          const std::shared_ptr<CancellationToken>& token,
+                          const Json& client_capabilities) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "resources/read params must be an object"));
@@ -581,7 +632,7 @@ Result<Json> readResource(IResourceProvider& provider,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token);
+  RequestContext context = makeContext(request, token, client_capabilities);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -628,7 +679,8 @@ Result<Json> readResource(IResourceProvider& provider,
 
 Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
                        bool is2026,
-                       const std::shared_ptr<CancellationToken>& token) {
+                       const std::shared_ptr<CancellationToken>& token,
+                       const Json& client_capabilities) {
   if (!request.params.is_object()) {
     return Result<Json>::failure(McpError::make(
         ErrorCode::InvalidParams, "prompts/get params must be an object"));
@@ -654,7 +706,7 @@ Result<Json> getPrompt(IPromptProvider& provider, const Message& request,
     return Result<Json>::failure(mrtr.error());
   }
 
-  RequestContext context = makeContext(request, token);
+  RequestContext context = makeContext(request, token, client_capabilities);
   context.inputResponses = mrtr.value().inputResponses;
   context.requestState = mrtr.value().requestState;
 
@@ -717,11 +769,31 @@ std::optional<Message> Dispatcher::dispatch(
   response.id = request.id;
 
   try {
+    bool rejected = false;
+    Json client_capabilities = Json::object();
     if (!isSupported(config_, version)) {
       response.error = McpError::make(
           ErrorCode::UnsupportedVersion,
-          "unsupported protocol version: " + version);
-    } else if (request.method == "initialize") {
+          "unsupported protocol version: " + version,
+          Json{{"requested", version},
+               {"supported", config_.supportedVersions}});
+      rejected = true;
+    } else if (is2026) {
+      auto validated = validateRequestMeta(request, version);
+      if (!validated.hasValue()) {
+        response.error = validated.error();
+        rejected = true;
+      } else {
+        client_capabilities = std::move(validated.value());
+      }
+    }
+
+    if (!rejected) {
+      if (is2026 && isRemoved2026Method(request.method)) {
+        response.error = McpError::make(
+            ErrorCode::MethodNotFound,
+            "method not found: " + request.method);
+      } else if (request.method == "initialize") {
       std::string requested = kWire2025;
       if (request.params.is_object() &&
           request.params.contains("protocolVersion")) {
@@ -802,11 +874,41 @@ std::optional<Message> Dispatcher::dispatch(
         }
       }
     } else if (request.method == "tools/call") {
-      auto called = callTool(registry_, request, is2026, notify, token);
+      auto called = callTool(registry_, request, is2026, notify, token,
+                        client_capabilities);
       if (!called.hasValue()) {
         response.error = called.error();
       } else {
         response.result = called.value();
+      }
+    } else if (request.method == "completion/complete") {
+      const Json& params = request.params;
+      if (!params.is_object() || !params.contains("ref") ||
+          !params.at("ref").is_object() || !params.contains("argument") ||
+          !params.at("argument").is_object() ||
+          !params.at("argument").contains("name") ||
+          !params.at("argument").at("name").is_string() ||
+          !params.at("argument").contains("value") ||
+          !params.at("argument").at("value").is_string()) {
+        response.error = McpError::make(
+            ErrorCode::InvalidParams,
+            "completion/complete requires ref and argument objects");
+      } else {
+        RequestContext context =
+            makeContext(request, token, client_capabilities);
+        Result<Json> completion =
+            Result<Json>(Json{{"values", Json::array()}});
+        if (config_.completions != nullptr) {
+          completion = config_.completions->complete(
+              params.at("ref"), params.at("argument"), context);
+        }
+        if (!completion.hasValue()) {
+          response.error = completion.error();
+        } else {
+          Json result;
+          result["completion"] = completion.value();
+          response.result = std::move(result);
+        }
       }
     } else if (request.method == "resources/list" ||
                request.method == "resources/templates/list" ||
@@ -823,7 +925,8 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result =
-                listResources(*resources_, request, cursor.value(), is2026, token);
+                listResources(*resources_, request, cursor.value(), is2026, token,
+                                client_capabilities);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -841,7 +944,8 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result = listResourceTemplates(*resources_, request,
-                                                cursor.value(), is2026, token);
+                                                cursor.value(), is2026, token,
+                                                client_capabilities);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -854,7 +958,8 @@ std::optional<Message> Dispatcher::dispatch(
           response.error = McpError::make(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
-          auto result = readResource(*resources_, request, is2026, token);
+          auto result = readResource(*resources_, request, is2026, token,
+                           client_capabilities);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {
@@ -871,7 +976,8 @@ std::optional<Message> Dispatcher::dispatch(
             response.error = cursor.error();
           } else {
             auto result =
-                listPrompts(*prompts_, request, cursor.value(), is2026, token);
+                listPrompts(*prompts_, request, cursor.value(), is2026, token,
+                            client_capabilities);
             if (!result.hasValue()) {
               response.error = result.error();
             } else {
@@ -884,7 +990,8 @@ std::optional<Message> Dispatcher::dispatch(
           response.error = McpError::make(
               ErrorCode::MethodNotFound, "method not found: " + request.method);
         } else {
-          auto result = getPrompt(*prompts_, request, is2026, token);
+          auto result = getPrompt(*prompts_, request, is2026, token,
+                       client_capabilities);
           if (!result.hasValue()) {
             response.error = result.error();
           } else {
@@ -896,12 +1003,25 @@ std::optional<Message> Dispatcher::dispatch(
       response.error = McpError::make(
           ErrorCode::MethodNotFound, "method not found: " + request.method);
     }
+    }
   } catch (const std::exception&) {
     response.error =
         McpError::make(ErrorCode::InternalError, "internal error");
   } catch (...) {
     response.error =
         McpError::make(ErrorCode::InternalError, "internal error");
+  }
+
+  if (is2026 && !response.result.is_null() &&
+      response.result.is_object()) {
+    Json& result = response.result;
+    if (!result.contains("resultType")) {
+      result["resultType"] = std::string(toString(ResultType::Complete));
+    }
+    if (!result.contains("_meta") || !result.at("_meta").is_object()) {
+      result["_meta"] = Json::object();
+    }
+    result["_meta"][kMetaServerInfo] = serverInfo(config_);
   }
 
   if (notification) {

@@ -490,22 +490,7 @@ public:
       }
     }
 
-    Json document = message;
-    if (protocol_version == "2026-07-28" &&
-        document.contains("method") && document.at("method").is_string()) {
-      if (!document.contains("params") ||
-          !document.at("params").is_object()) {
-        document["params"] = Json::object();
-      }
-      Json& params = document["params"];
-      if (!params.contains("_meta") || !params.at("_meta").is_object()) {
-        params["_meta"] = Json::object();
-      }
-      Json& meta = params["_meta"];
-      if (!meta.contains("protocolVersion")) {
-        meta["protocolVersion"] = protocol_version;
-      }
-    }
+    const Json& document = message;
 
     std::string body;
     try {
@@ -560,6 +545,11 @@ public:
     }
 
     if (status < 200 || status >= 300) {
+      // D18 maps JSON-RPC errors to 4xx statuses. If the body carries a
+      // JSON-RPC message, deliver it so callers see the real error code.
+      if (parser.finish() && parser.dispatched()) {
+        return Status::success();
+      }
       reportError(McpError::make(
           ErrorCode::InternalError, "unexpected HTTP status",
           Json{{"reason", "http_status"}, {"status", status}}));

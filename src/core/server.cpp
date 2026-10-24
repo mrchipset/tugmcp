@@ -54,62 +54,78 @@ Result<SubscriptionFilter> parseSubscriptionFilter(const Json& params) {
   }
   if (!params.is_object()) {
     return Result<SubscriptionFilter>::failure(McpError::make(
-        ErrorCode::InvalidParams, "subscriptions/listen params must be an object"));
+        ErrorCode::InvalidParams,
+        "subscriptions/listen params must be an object"));
   }
-  if (!params.contains("subscriptions")) {
+
+  if (params.contains("subscriptions")) {
+    const Json& legacy = params.at("subscriptions");
+    if (legacy.is_object() && legacy.contains("resources") &&
+        legacy.at("resources").is_array() &&
+        !legacy.at("resources").empty()) {
+      return Result<SubscriptionFilter>::failure(McpError::make(
+          ErrorCode::InvalidParams,
+          "per-resource subscriptions are not supported in 2026"));
+    }
+  }
+
+  if (!params.contains("notifications")) {
     return filter;
   }
-  const Json& subscriptions = params.at("subscriptions");
-  if (!subscriptions.is_object()) {
+  const Json& notifications = params.at("notifications");
+  if (!notifications.is_object()) {
     return Result<SubscriptionFilter>::failure(McpError::make(
-        ErrorCode::InvalidParams, "subscriptions must be an object"));
+        ErrorCode::InvalidParams, "notifications must be an object"));
   }
 
-  if (subscriptions.contains("listChanged")) {
-    const Json& list_changed = subscriptions.at("listChanged");
-    if (!list_changed.is_array()) {
-      return Result<SubscriptionFilter>::failure(McpError::make(
-          ErrorCode::InvalidParams, "listChanged must be an array"));
+  auto read_flag = [&](const char* key,
+                       ListKind kind) -> Result<bool> {
+    if (!notifications.contains(key)) {
+      return false;
     }
-    for (const auto& item : list_changed) {
-      if (!item.is_string()) {
-        return Result<SubscriptionFilter>::failure(McpError::make(
-            ErrorCode::InvalidParams,
-            "listChanged values must be strings"));
-      }
-      const std::string value = item.get<std::string>();
-      if (value == "tools") {
-        filter.listChanged.push_back(ListKind::Tools);
-      } else if (value == "prompts") {
-        filter.listChanged.push_back(ListKind::Prompts);
-      } else if (value == "resources") {
-        filter.listChanged.push_back(ListKind::Resources);
-      } else {
-        return Result<SubscriptionFilter>::failure(McpError::make(
-            ErrorCode::InvalidParams,
-            "invalid listChanged value: " + value));
-      }
+    if (!notifications.at(key).is_boolean()) {
+      return Result<bool>::failure(McpError::make(
+          ErrorCode::InvalidParams,
+          std::string(key) + " must be a boolean"));
     }
-  }
+    if (notifications.at(key).get<bool>()) {
+      filter.listChanged.push_back(kind);
+    }
+    return true;
+  };
 
-  if (subscriptions.contains("resources")) {
-    const Json& resources = subscriptions.at("resources");
-    if (!resources.is_array()) {
-      return Result<SubscriptionFilter>::failure(McpError::make(
-          ErrorCode::InvalidParams, "resources must be an array"));
-    }
-    for (const auto& item : resources) {
-      if (!item.is_string()) {
-        return Result<SubscriptionFilter>::failure(McpError::make(
-            ErrorCode::InvalidParams, "resources values must be strings"));
-      }
-      filter.resources.push_back(item.get<std::string>());
-    }
+  auto tools = read_flag("toolsListChanged", ListKind::Tools);
+  if (!tools.hasValue()) {
+    return Result<SubscriptionFilter>::failure(tools.error());
   }
-
+  auto prompts = read_flag("promptsListChanged", ListKind::Prompts);
+  if (!prompts.hasValue()) {
+    return Result<SubscriptionFilter>::failure(prompts.error());
+  }
+  auto resources = read_flag("resourcesListChanged", ListKind::Resources);
+  if (!resources.hasValue()) {
+    return Result<SubscriptionFilter>::failure(resources.error());
+  }
   return filter;
 }
 
+Json acceptedNotifications(const SubscriptionFilter& filter) {
+  Json accepted = Json::object();
+  for (const ListKind kind : filter.listChanged) {
+    switch (kind) {
+    case ListKind::Tools:
+      accepted["toolsListChanged"] = true;
+      break;
+    case ListKind::Prompts:
+      accepted["promptsListChanged"] = true;
+      break;
+    case ListKind::Resources:
+      accepted["resourcesListChanged"] = true;
+      break;
+    }
+  }
+  return accepted;
+}
 } // namespace
 
 McpServer::McpServer(ServerOptions options,
@@ -139,6 +155,7 @@ Status McpServer::run() {
   config.instructions = options_.instructions;
   config.supportedVersions = options_.supportedVersions;
   config.supportsSubscriptions = transport_->supportsStreaming();
+  config.completions = options_.completions.get();
   // Declared before the cleanup guard so queued tasks always see a live
   // dispatcher: guard cleanup drains the executor before this object dies.
   Dispatcher dispatcher(tools_, options_.resources.get(),
@@ -384,13 +401,13 @@ Status McpServer::run() {
               return;
             }
 
-            const std::uint64_t serial =
-                next_subscription_id_.fetch_add(1, std::memory_order_relaxed);
+            const Json subscription_id_json = message.id.toJson();
             const SubscriptionId subscription_id =
-                "s" + std::to_string(serial);
+                subscription_id_json.dump();
 
             SubscriptionState state;
             state.id = subscription_id;
+            state.subscriptionIdJson = subscription_id_json;
             state.route = metadata.route;
             state.listChanged = filter.value().listChanged;
             state.resources.insert(filter.value().resources.begin(),
@@ -406,8 +423,11 @@ Status McpServer::run() {
             ack["method"] =
                 "notifications/subscriptions/acknowledged";
             ack["params"] =
-                Json{{"subscriptionId", subscription_id},
-                     {"requestId", message.id.toJson()}};
+                Json{{"notifications",
+                      acceptedNotifications(filter.value())},
+                     {"_meta",
+                      Json{{"io.modelcontextprotocol/subscriptionId",
+                            subscription_id_json}}}};
 
             bool sent_ok = false;
             try {
@@ -637,7 +657,9 @@ void McpServer::notifyResourceUpdated(std::string_view uri) {
     notification["method"] = "notifications/resources/updated";
     notification["params"] =
         Json{{"uri", std::string(uri)},
-             {"subscriptionId", subscription.id}};
+             {"_meta",
+              Json{{"io.modelcontextprotocol/subscriptionId",
+                    subscription.subscriptionIdJson}}}};
 
     Status sent = Status::failure(McpError::make(
         ErrorCode::InternalError, "subscription route unavailable"));
@@ -677,7 +699,10 @@ void McpServer::notifyListChanged(ListKind kind) {
     Json notification;
     notification["jsonrpc"] = "2.0";
     notification["method"] = method;
-    notification["params"] = Json{{"subscriptionId", subscription.id}};
+    notification["params"] =
+        Json{{"_meta",
+              Json{{"io.modelcontextprotocol/subscriptionId",
+                    subscription.subscriptionIdJson}}}};
 
     Status sent = Status::failure(McpError::make(
         ErrorCode::InternalError, "subscription route unavailable"));

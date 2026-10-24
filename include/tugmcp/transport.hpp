@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "error.hpp"
 #include "message.hpp"
@@ -61,6 +62,9 @@ public:
   // sends it in 2026 (Auto maps to CloseStream), and server-side matching is
   // best-effort by id across routes.
   virtual void cancelPending(const RequestId&) {}
+
+  // Supported protocol versions for server-side negotiation (HTTP).
+  virtual void setSupportedVersions(std::vector<std::string>) {}
 
   // Whether this transport can open per-request server streams (SSE).
   virtual bool supportsStreaming() const { return false; }

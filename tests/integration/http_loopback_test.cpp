@@ -240,7 +240,7 @@ TEST_CASE("Mcp-Method mismatch returns -32020") {
   httplib::Client client(baseUrlFor(started.port));
   auto response = client.Post(
       "/mcp", headers,
-      R"({"jsonrpc":"2.0","id":5,"method":"ping","params":{}})",
+      R"({"jsonrpc":"2.0","id":5,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})",
       "application/json");
   REQUIRE(response);
   CHECK(response->status == 400);
@@ -306,9 +306,9 @@ TEST_CASE("concurrent requests may reuse a JSON-RPC id across routes") {
       });
 
   std::string first_body =
-      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"first"}})";
+      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"first","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})";
   std::string second_body =
-      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"second"}})";
+      R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{"tag":"second","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})";
 
   struct PostResult {
     int status = -1;

@@ -247,6 +247,21 @@ public:
           failureWithReason("failed to build params", "send_failed"));
     }
 
+    if (options_.protocolVersion == "2026-07-28" &&
+        call_params.is_object()) {
+      if (!call_params.contains("_meta") ||
+          !call_params.at("_meta").is_object()) {
+        call_params["_meta"] = Json::object();
+      }
+      Json& meta = call_params["_meta"];
+      meta["io.modelcontextprotocol/protocolVersion"] =
+          options_.protocolVersion;
+      meta["io.modelcontextprotocol/clientCapabilities"] =
+          options_.capabilities;
+      meta["io.modelcontextprotocol/clientInfo"] =
+          Json{{"name", options_.name}, {"version", options_.version}};
+    }
+
     const std::int64_t id =
         next_id_.fetch_add(1, std::memory_order_relaxed);
     RequestId request_id;
@@ -433,27 +448,41 @@ public:
           failureWithReason("transport is null", "transport_closed"));
     }
 
-    Json subscriptions = Json::object();
-    if (!filter.listChanged.empty()) {
-      Json kinds = Json::array();
-      for (const ListKind kind : filter.listChanged) {
-        kinds.push_back(listKindName(kind));
-      }
-      subscriptions["listChanged"] = std::move(kinds);
-    }
     if (!filter.resources.empty()) {
-      Json resources = Json::array();
-      for (const auto& uri : filter.resources) {
-        resources.push_back(uri);
+      return Result<SubscriptionId>::failure(McpError::make(
+          ErrorCode::InvalidParams,
+          "per-resource subscriptions are not supported in 2026"));
+    }
+
+    Json notifications = Json::object();
+    for (const ListKind kind : filter.listChanged) {
+      switch (kind) {
+      case ListKind::Tools:
+        notifications["toolsListChanged"] = true;
+        break;
+      case ListKind::Prompts:
+        notifications["promptsListChanged"] = true;
+        break;
+      case ListKind::Resources:
+        notifications["resourcesListChanged"] = true;
+        break;
       }
-      subscriptions["resources"] = std::move(resources);
     }
 
     Json params = Json::object();
-    if (!subscriptions.empty()) {
-      params["subscriptions"] = std::move(subscriptions);
+    if (!notifications.empty()) {
+      params["notifications"] = std::move(notifications);
     }
-
+    if (options_.protocolVersion == "2026-07-28") {
+      params["_meta"] =
+          Json{{"io.modelcontextprotocol/protocolVersion",
+                options_.protocolVersion},
+               {"io.modelcontextprotocol/clientCapabilities",
+                options_.capabilities},
+               {"io.modelcontextprotocol/clientInfo",
+                Json{{"name", options_.name},
+                     {"version", options_.version}}}};
+    }
     const std::int64_t id =
         next_id_.fetch_add(1, std::memory_order_relaxed);
     RequestId request_id;
@@ -989,14 +1018,16 @@ private:
 
   void handleSubscriptionAck(const Json& params) noexcept {
     try {
-      if (!params.is_object() || !params.contains("subscriptionId") ||
-          !params.at("subscriptionId").is_string() ||
-          !params.contains("requestId")) {
+      if (!params.is_object() || !params.contains("_meta") ||
+          !params.at("_meta").is_object() ||
+          !params.at("_meta").contains(
+              "io.modelcontextprotocol/subscriptionId")) {
         return;
       }
-      const SubscriptionId subscription_id =
-          params.at("subscriptionId").get<SubscriptionId>();
-      auto request_id = RequestId::fromJson(params.at("requestId"));
+      const Json& subscription_json =
+          params.at("_meta").at(
+              "io.modelcontextprotocol/subscriptionId");
+      auto request_id = RequestId::fromJson(subscription_json);
       if (!request_id.hasValue()) {
         return;
       }
@@ -1017,14 +1048,13 @@ private:
         if (handshake->done) {
           return;
         }
-        handshake->id = subscription_id;
+        handshake->id = subscription_json.dump();
         handshake->done = true;
         handshake->cv.notify_all();
       }
     } catch (...) {
     }
   }
-
   void handleSubscriptionEvent(const Json& raw,
                                const SubscriptionId& id) noexcept {
     std::function<void(const Json&)> callback;
@@ -1055,11 +1085,15 @@ private:
         return;
       }
       if (notification.params.is_object() &&
-          notification.params.contains("subscriptionId") &&
-          notification.params.at("subscriptionId").is_string()) {
+          notification.params.contains("_meta") &&
+          notification.params.at("_meta").is_object() &&
+          notification.params.at("_meta").contains(
+              "io.modelcontextprotocol/subscriptionId")) {
         handleSubscriptionEvent(
             raw,
-            notification.params.at("subscriptionId").get<SubscriptionId>());
+            notification.params.at("_meta")
+                .at("io.modelcontextprotocol/subscriptionId")
+                .dump());
         return;
       }
       const Json& params = notification.params;
