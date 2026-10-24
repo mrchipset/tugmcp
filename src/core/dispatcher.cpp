@@ -894,20 +894,36 @@ std::optional<Message> Dispatcher::dispatch(
             ErrorCode::InvalidParams,
             "completion/complete requires ref and argument objects");
       } else {
-        RequestContext context =
-            makeContext(request, token, client_capabilities);
-        Result<Json> completion =
-            Result<Json>(Json{{"values", Json::array()}});
-        if (config_.completions != nullptr) {
-          completion = config_.completions->complete(
-              params.at("ref"), params.at("argument"), context);
+        const Json& ref = params.at("ref");
+        bool valid_ref = false;
+        if (ref.contains("type") && ref.at("type").is_string()) {
+          const std::string type = ref.at("type").get<std::string>();
+          if (type == "ref/prompt") {
+            valid_ref = ref.contains("name") && ref.at("name").is_string();
+          } else if (type == "ref/resource") {
+            valid_ref = ref.contains("uri") && ref.at("uri").is_string();
+          }
         }
-        if (!completion.hasValue()) {
-          response.error = completion.error();
+        if (!valid_ref) {
+          response.error = McpError::make(
+              ErrorCode::InvalidParams,
+              "completion ref must be ref/prompt or ref/resource");
         } else {
-          Json result;
-          result["completion"] = completion.value();
-          response.result = std::move(result);
+          RequestContext context =
+              makeContext(request, token, client_capabilities);
+          Result<Json> completion =
+              Result<Json>(Json{{"values", Json::array()}});
+          if (config_.completions != nullptr) {
+            completion = config_.completions->complete(
+                ref, params.at("argument"), context);
+          }
+          if (!completion.hasValue()) {
+            response.error = completion.error();
+          } else {
+            Json result;
+            result["completion"] = completion.value();
+            response.result = std::move(result);
+          }
         }
       }
     } else if (request.method == "resources/list" ||

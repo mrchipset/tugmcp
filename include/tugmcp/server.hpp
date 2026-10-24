@@ -75,6 +75,8 @@ public:
   Status sendNotification(std::string_view sessionId,
                           std::string_view method,
                           Json params = Json::object());
+  // 2026 has no per-URI subscription; this is 2025-only and a no-op for
+  // 2026 subscriptions.
   void notifyResourceUpdated(std::string_view uri);
   void notifyListChanged(ListKind kind);
   std::size_t activeSubscriptions() const;

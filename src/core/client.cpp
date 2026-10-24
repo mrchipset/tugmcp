@@ -651,6 +651,13 @@ public:
   }
 
   Status cancel(const RequestId& id, CancelMode mode) {
+    if (options_.protocolVersion == "2026-07-28" &&
+        mode == CancelMode::Notification) {
+      return Status::failure(McpError::make(
+          ErrorCode::InvalidParams,
+          "notification cancellation is not supported in 2026",
+          Json{{"reason", "notification_cancel_unsupported"}}));
+    }
     std::shared_ptr<PendingRequest> pending;
     {
       std::lock_guard<std::mutex> lock(mutex_);

@@ -1,4 +1,4 @@
-﻿// 2025 Streamable HTTP sessions: header lifecycle, GET replay, server requests.
+// 2025 Streamable HTTP sessions: header lifecycle, GET replay, server requests.
 
 #include <doctest/doctest.h>
 
@@ -76,6 +76,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setSupportedVersions(std::vector<std::string> versions) override {
+    inner_->setSupportedVersions(std::move(versions));
+  }
+
   void setOnSessionClosed(
       std::function<void(const std::string&)> handler) override {
     inner_->setOnSessionClosed(std::move(handler));

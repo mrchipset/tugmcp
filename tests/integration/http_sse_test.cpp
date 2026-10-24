@@ -111,6 +111,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setSupportedVersions(std::vector<std::string> versions) override {
+    inner_->setSupportedVersions(std::move(versions));
+  }
+
   void setOnSessionClosed(
       std::function<void(const std::string&)> handler) override {
     inner_->setOnSessionClosed(std::move(handler));
@@ -800,6 +804,62 @@ TEST_CASE("2025 unknown methods still return HTTP 200") {
   CHECK(response->status == 200);
   const Json error = Json::parse(response->body);
   CHECK(error.at("error").at("code") == -32601);
+
+  client.stop();
+  running.stop();
+}
+TEST_CASE("unsupported version reports the transport supported list") {
+  ServerOptions core_options;
+  core_options.supportedVersions = {"2025-11-25"};
+  RunningServer running(StreamableHttpServerOptions{}, core_options);
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "1999-01-01");
+  headers.emplace("Mcp-Method", "tools/list");
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"id", 12},
+           {"method", "tools/list"},
+           {"params",
+            Json{{"_meta",
+                  Json{{"io.modelcontextprotocol/protocolVersion",
+                        "1999-01-01"},
+                       {"io.modelcontextprotocol/clientCapabilities",
+                        Json::object()}}}}}};
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 400);
+  const Json error = Json::parse(response->body);
+  CHECK(error.at("id") == 12);
+  CHECK(error.at("error").at("code") == -32022);
+  CHECK(error.at("error").at("data").at("requested") == "1999-01-01");
+  CHECK(error.at("error").at("data").at("supported") ==
+        Json::array({"2025-11-25"}));
+
+  client.stop();
+  running.stop();
+}
+
+TEST_CASE("2026 notification with bad _meta gets an empty 400 body") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  const Json body =
+      Json{{"jsonrpc", "2.0"},
+           {"method", "notifications/message"},
+           {"params", Json::object()}};
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2026-07-28");
+  headers.emplace("Mcp-Method", "notifications/message");
+  auto response = client.Post("/mcp", headers, body.dump(),
+                              "application/json");
+  REQUIRE(response);
+  CHECK(response->status == 400);
+  CHECK(response->body.empty());
 
   client.stop();
   running.stop();

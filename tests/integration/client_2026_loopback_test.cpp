@@ -97,6 +97,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setSupportedVersions(std::vector<std::string> versions) override {
+    inner_->setSupportedVersions(std::move(versions));
+  }
+
   void setOnSessionClosed(
       std::function<void(const std::string&)> handler) override {
     inner_->setOnSessionClosed(std::move(handler));
@@ -682,4 +686,54 @@ TEST_CASE("cancelPending before send short-circuits the request") {
   REQUIRE_FALSE(sent.ok);
   CHECK(sent.error.data.at("reason") == "cancelled");
   transport->close();
+}
+TEST_CASE("2026 CancelMode::Notification is rejected without sending") {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  RunningServer running(options);
+  std::promise<void> entered;
+  auto entered_future = entered.get_future();
+  std::atomic<bool> observed{false};
+  addTool(running.server(), "slow",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            observed.store(true);
+            return textOutcome("done");
+          });
+  running.start();
+
+  auto client_storage = makeClient(running.port());
+  McpClient& client = *client_storage;
+  REQUIRE(client.connect().ok);
+
+  RequestId id;
+  CallOptions call_options;
+  call_options.out_id = &id;
+  std::optional<Result<Json>> outcome;
+  std::thread caller([&] {
+    outcome = client.callTool("slow", Json::object(), call_options);
+  });
+  entered_future.wait();
+
+  const Status rejected =
+      client.cancel(id, mcp::v1::CancelMode::Notification);
+  REQUIRE_FALSE(rejected.ok);
+  CHECK(static_cast<int>(rejected.error.code) == -32602);
+  CHECK(rejected.error.data.at("reason") ==
+        "notification_cancel_unsupported");
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  CHECK_FALSE(observed.load());
+
+  REQUIRE(client.cancel(id, mcp::v1::CancelMode::CloseStream).ok);
+  caller.join();
+  REQUIRE(outcome.has_value());
+  REQUIRE_FALSE(outcome->hasValue());
+  running.stop();
+  CHECK(observed.load());
+
+  client.close();
 }

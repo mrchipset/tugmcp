@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -74,7 +75,14 @@ public:
   SignalTransport(std::shared_ptr<ITransport> inner, std::promise<void> ready)
       : inner_(std::move(inner)), ready_(std::move(ready)) {}
 
-  Status start() override { return inner_->start(); }
+  Status start() override {
+    Status status = inner_->start();
+    if (status && !signaled_) {
+      signaled_ = true;
+      ready_.set_value();
+    }
+    return status;
+  }
   Status send(const Json& message) override { return inner_->send(message); }
 
   void setOnMessage(std::function<void(Json)> handler) override {
@@ -87,10 +95,6 @@ public:
 
   void setOnClose(std::function<void()> handler) override {
     inner_->setOnClose(std::move(handler));
-    if (!signaled_) {
-      signaled_ = true;
-      ready_.set_value();
-    }
   }
 
   void close() override { inner_->close(); }

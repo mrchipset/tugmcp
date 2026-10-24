@@ -31,6 +31,8 @@ using PromptOutcome = OperationOutcome<PromptResult>;
 class ICompletionProvider {
 public:
   virtual ~ICompletionProvider() = default;
+  // Returns the inner completion object (`{"values":[...]...}`); the
+  // dispatcher wraps it under the `completion` result key.
   virtual Result<Json> complete(const Json& ref, const Json& argument,
                               RequestContext& context) = 0;
 };

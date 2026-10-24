@@ -1267,14 +1267,22 @@ private:
       }
 
       if (version == "2026-07-28") {
+        // Transport-level precheck mirrors the dispatcher validation so D18
+        // HTTP status mapping can happen before dispatch.
+        auto reject_meta = [&](const McpError& error) {
+          if (message.kind == MessageKind::Notification) {
+            response.status = 400;
+            response.set_content("", "application/json");
+          } else {
+            respondError(response, 400, error, message.id.toJson());
+          }
+        };
         if (!message.params.is_object() ||
             !message.params.contains("_meta") ||
             !message.params.at("_meta").is_object()) {
-          respondError(response, 400,
-                       McpError::make(
-                           ErrorCode::InvalidParams,
-                           "2026 requests require params._meta"),
-                       message.id.toJson());
+          reject_meta(McpError::make(
+              ErrorCode::InvalidParams,
+              "2026 requests require params._meta"));
           return;
         }
         const Json& meta = message.params.at("_meta");
@@ -1285,20 +1293,16 @@ private:
                 "io.modelcontextprotocol/clientCapabilities") ||
             !meta.at("io.modelcontextprotocol/clientCapabilities")
                  .is_object()) {
-          respondError(response, 400,
-                       McpError::make(
-                           ErrorCode::InvalidParams,
-                           "params._meta is missing required 2026 fields"),
-                       message.id.toJson());
+          reject_meta(McpError::make(
+              ErrorCode::InvalidParams,
+              "params._meta is missing required 2026 fields"));
           return;
         }
         if (meta.at("io.modelcontextprotocol/protocolVersion")
                 .get<std::string>() != version) {
-          respondError(response, 400,
-                       McpError::make(
-                           ErrorCode::HeaderMismatch,
-                           "params._meta protocolVersion mismatch"),
-                       message.id.toJson());
+          reject_meta(McpError::make(
+              ErrorCode::HeaderMismatch,
+              "params._meta protocolVersion mismatch"));
           return;
         }
         if (request.get_header_value("Mcp-Method") != message.method) {

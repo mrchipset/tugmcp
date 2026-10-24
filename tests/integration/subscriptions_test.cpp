@@ -79,6 +79,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setSupportedVersions(std::vector<std::string> versions) override {
+    inner_->setSupportedVersions(std::move(versions));
+  }
+
   void setOnSessionClosed(
       std::function<void(const std::string&)> handler) override {
     inner_->setOnSessionClosed(std::move(handler));
@@ -160,7 +164,7 @@ std::unique_ptr<McpClient> makeClient(int port, const std::string& protocol) {
 
 } // namespace
 
-TEST_CASE("subscription resource updates are routed by uri and id") {
+TEST_CASE("subscription listChanged updates are routed by subscription id") {
   ServerOptions options;
   RunningServer running(options);
   running.start();
@@ -415,5 +419,157 @@ TEST_CASE("server drops a subscription when the client stream closes") {
   }
   CHECK(running.server().activeSubscriptions() == 0);
 
+  running.stop();
+}
+namespace {
+
+struct ListenStream {
+  std::mutex mutex;
+  std::string data;
+  std::shared_ptr<httplib::Client> client;
+  std::thread thread;
+};
+
+Json firstSseJson(const std::string& body) {
+  const std::size_t data_pos = body.find("data: ");
+  if (data_pos == std::string::npos) {
+    return nullptr;
+  }
+  const std::size_t end = body.find('\n', data_pos);
+  const std::string data =
+      body.substr(data_pos + 6,
+                  end == std::string::npos ? std::string::npos
+                                           : end - (data_pos + 6));
+  try {
+    return Json::parse(data);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+void startListenStream(int port, ListenStream& stream) {
+  stream.client = std::make_shared<httplib::Client>(baseUrlFor(port));
+  stream.client->set_read_timeout(std::chrono::seconds(10));
+  stream.thread = std::thread([&stream] {
+    httplib::Headers headers;
+    headers.emplace("MCP-Protocol-Version", "2026-07-28");
+    headers.emplace("Mcp-Method", "subscriptions/listen");
+    headers.emplace("Accept", "text/event-stream");
+    const Json body =
+        Json{{"jsonrpc", "2.0"},
+             {"id", 1},
+             {"method", "subscriptions/listen"},
+             {"params",
+              Json{{"notifications",
+                    Json{{"toolsListChanged", true}}},
+                   {"_meta",
+                    Json{{"io.modelcontextprotocol/protocolVersion",
+                          "2026-07-28"},
+                         {"io.modelcontextprotocol/clientCapabilities",
+                          Json::object()}}}}}};
+    stream.client->Post(
+        "/mcp", headers, body.dump(), "application/json",
+        [&stream](const char* data, std::size_t size) {
+          std::lock_guard<std::mutex> lock(stream.mutex);
+          stream.data.append(data, size);
+          return true;
+        });
+    stream.client->stop();
+  });
+}
+
+std::size_t countOccurrences(const std::string& haystack,
+                             const std::string& needle) {
+  std::size_t count = 0;
+  std::size_t offset = 0;
+  while ((offset = haystack.find(needle, offset)) != std::string::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
+bool waitUntil(const std::function<bool()>& predicate,
+               std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return predicate();
+}
+
+} // namespace
+
+TEST_CASE("two routes may use subscription id 1 independently") {
+  ServerOptions options;
+  RunningServer running(options);
+  running.start();
+
+  ListenStream first;
+  ListenStream second;
+  startListenStream(running.port(), first);
+  startListenStream(running.port(), second);
+
+  REQUIRE(waitUntil(
+      [&] { return running.server().activeSubscriptions() == 2; },
+      std::chrono::seconds(2)));
+
+  std::string first_ack;
+  std::string second_ack;
+  REQUIRE(waitUntil(
+      [&] {
+        {
+          std::lock_guard<std::mutex> lock(first.mutex);
+          first_ack = firstSseJson(first.data).dump();
+        }
+        {
+          std::lock_guard<std::mutex> lock(second.mutex);
+          second_ack = firstSseJson(second.data).dump();
+        }
+        return first_ack.find("acknowledged") != std::string::npos &&
+               second_ack.find("acknowledged") != std::string::npos;
+      },
+      std::chrono::seconds(2)));
+
+  const Json first_frame = Json::parse(first_ack);
+  const Json second_frame = Json::parse(second_ack);
+  CHECK(first_frame.at("params").at("_meta")
+            .at("io.modelcontextprotocol/subscriptionId") == 1);
+  CHECK(second_frame.at("params").at("_meta")
+            .at("io.modelcontextprotocol/subscriptionId") == 1);
+  CHECK_FALSE(first_frame.at("params").contains("subscriptionId"));
+
+  running.server().notifyListChanged(ListKind::Tools);
+  REQUIRE(waitUntil(
+      [&] {
+        std::lock_guard<std::mutex> a(first.mutex);
+        std::lock_guard<std::mutex> b(second.mutex);
+        return first.data.find("notifications/tools/list_changed") !=
+                   std::string::npos &&
+               second.data.find("notifications/tools/list_changed") !=
+                   std::string::npos;
+      },
+      std::chrono::seconds(2)));
+
+  first.client->stop();
+  first.thread.join();
+  REQUIRE(waitUntil(
+      [&] { return running.server().activeSubscriptions() == 1; },
+      std::chrono::seconds(2)));
+
+  running.server().notifyListChanged(ListKind::Tools);
+  REQUIRE(waitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(second.mutex);
+        return countOccurrences(second.data,
+                                "notifications/tools/list_changed") >= 2;
+      },
+      std::chrono::seconds(2)));
+
+  second.client->stop();
+  second.thread.join();
   running.stop();
 }

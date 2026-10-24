@@ -405,8 +405,10 @@ Status McpServer::run() {
             const SubscriptionId subscription_id =
                 subscription_id_json.dump();
 
+            const SubscriptionId subscription_key =
+                metadata.route + "\x1f" + subscription_id;
             SubscriptionState state;
-            state.id = subscription_id;
+            state.id = subscription_key;
             state.subscriptionIdJson = subscription_id_json;
             state.route = metadata.route;
             state.listChanged = filter.value().listChanged;
@@ -415,7 +417,7 @@ Status McpServer::run() {
             state.protocolVersion = metadata.protocolVersion;
             {
               std::lock_guard<std::mutex> lock(subscriptions_mutex_);
-              subscriptions_.emplace(subscription_id, std::move(state));
+              subscriptions_.emplace(subscription_key, std::move(state));
             }
 
             Json ack;
@@ -444,7 +446,7 @@ Status McpServer::run() {
                   "failed to send subscription ack"));
             }
             if (!sent_ok) {
-              removeSubscription(subscription_id);
+              removeSubscription(subscription_key);
             }
             return;
           }
@@ -583,6 +585,7 @@ Status McpServer::run() {
     transport_->setOnSessionClosed(
         [this](const std::string& id) { handleSessionClosed(id); });
 
+    transport_->setSupportedVersions(options_.supportedVersions);
     Status started = transport_->start();
     if (!started) {
       return started;
