@@ -245,6 +245,7 @@ include/tugmcp/
   canonical_json.hpp     // JCS/stable subset + tool_schema_hash
   transport/stdio.hpp    // 无第三方依赖
   transport/http.hpp     // 仅声明 TlsOptions / StreamableHttp* / 工厂；不含 cpp-httplib
+  transport/legacy_sse.hpp // 可选 legacy HTTP+SSE（TUGMCP_ENABLE_LEGACY_SSE=ON）
   detail/http_httplib.hpp // header-only 模式唯一 include cpp-httplib 的实现头
   protocol/v2026.hpp
   protocol/v2025.hpp
@@ -752,6 +753,14 @@ POST /messages  -> JSON-RPC 请求；响应/通知通过 GET /sse 的 event: mes
 | 测试 | 只做兼容矩阵；不作为主验收路径 |
 
 > Legacy 适配只实现 2024-11-05 的既有语义；不把 2025/2026 的新能力硬塞进去。
+
+**P4 具体 wire 约定**：
+- session id 为 32 hex；`GET /sse` 首帧 `event: endpoint`，data 为 `/messages?sessionId=<id>`。
+- `POST /messages?sessionId=<id>` 接受单个 JSON-RPC 对象或 batch 数组；每个响应/通知作为独立 `event: message` + `data: <json>` 下发（batch 不合并成数组事件）。
+- 缺失 session → 400；未知 session → 404；GET 流已关闭 → 410。
+- 认证/Origin 策略与主 HTTP 传输一致；auth 失败 401。
+- `TUGMCP_ENABLE_LEGACY_SSE=OFF` 时不构建该 target；不得影响 core/2025/2026 的 batch 拒绝语义。
+- 客户端：先 GET /sse 解析 endpoint，再 POST；响应/通知经同一 SSE 回调；关闭时结束 GET 流。
 
 ---
 

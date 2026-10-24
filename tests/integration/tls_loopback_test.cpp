@@ -229,3 +229,56 @@ TEST_CASE("TLS client with an untrusted CA reports tls_handshake_failed") {
 }
 
 #endif // TUGMCP_TLS_ENABLED
+TEST_CASE("TLS 2025 session and GET stream smoke") {
+  auto created_server = makeStreamableHttpServerTransport(tlsServerOptions());
+  REQUIRE(created_server.hasValue());
+  std::shared_ptr<ITransport> server_transport = created_server.value();
+  REQUIRE(server_transport->start().ok);
+  auto concrete =
+      std::dynamic_pointer_cast<HttpServerTransport>(server_transport);
+  REQUIRE(concrete != nullptr);
+  const int port = concrete->boundPort();
+  REQUIRE(port > 0);
+
+  std::promise<void> ready;
+  auto ready_future = ready.get_future();
+  auto signal =
+      std::make_shared<SignalTransport>(server_transport, std::move(ready));
+
+  ServerOptions core_options;
+  core_options.allowUnvalidatedTools = true;
+  McpServer server(core_options, signal);
+  REQUIRE(server.tools().add(echoDescriptor(),
+                             std::make_shared<EchoHandler>()).ok);
+  std::thread server_thread([&server] { server.run(); });
+  ready_future.wait();
+
+  StreamableHttpClientOptions client_options;
+  client_options.baseUrl = httpsUrlFor(port);
+  client_options.requestTimeout = std::chrono::milliseconds(5000);
+  client_options.tls.enabled = true;
+  client_options.tls.caBundlePath = fixtureDir() + "ca.pem";
+  client_options.protocolVersion = "2025-11-25";
+
+  auto created_client = makeStreamableHttpClientTransport(client_options);
+  REQUIRE(created_client.hasValue());
+
+  ClientOptions core_client_options;
+  core_client_options.timeoutMs = 5000;
+  core_client_options.protocolVersion = "2025-11-25";
+  McpClient client(core_client_options, created_client.value());
+
+  const Status connected = client.connect();
+  REQUIRE(connected.ok);
+  REQUIRE_FALSE(client.sessionId().empty());
+
+  auto listed = client.listTools();
+  REQUIRE(listed.hasValue());
+  auto called = client.callTool("echo", Json{{"text", "tls2025"}});
+  REQUIRE(called.hasValue());
+  CHECK(called.value().at("structuredContent").at("text") == "tls2025");
+
+  client.close();
+  server.stop();
+  server_thread.join();
+}

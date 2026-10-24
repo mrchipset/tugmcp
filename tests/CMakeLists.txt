@@ -51,7 +51,7 @@ doctest_discover_tests(tugmcp_executor_tests TEST_PREFIX executor.
   PROPERTIES LABELS integration TIMEOUT 10
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
-if(TUGMCP_TLS)
+if(TUGMCP_TLS OR TUGMCP_ENABLE_LEGACY_SSE)
   set(TUGMCP_INTEGRATION_TIMEOUT 10)
 else()
   set(TUGMCP_INTEGRATION_TIMEOUT 2)
@@ -87,6 +87,10 @@ if(TUGMCP_WITH_HTTP)
     integration/http_session_test.cpp
     integration/client_2025_loopback_test.cpp
     integration/security_test.cpp)
+  if(TUGMCP_ENABLE_LEGACY_SSE)
+    target_sources(tugmcp_integration_tests PRIVATE
+      integration/legacy_sse_test.cpp)
+  endif()
   target_link_libraries(tugmcp_integration_tests PRIVATE
     tugmcp::http tugmcp_3rd_httplib)
   if(TUGMCP_TLS)
