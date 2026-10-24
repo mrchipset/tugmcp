@@ -713,3 +713,24 @@ TEST_CASE("protocol surface: every content type emits only its fields") {
   CHECK(invalid_response->error->data.at("reason") ==
         "invalid_content_block");
 }
+TEST_CASE("protocol surface: image/audio require data and mimeType") {
+  ToolRegistry registry;
+  addTool(registry, "bad-image", [](const Json&, RequestContext&,
+                                    IProgressSink&) {
+    ToolResult result;
+    ContentBlock block;
+    block.type = mcp::v1::ContentType::Image;
+    block.dataBase64 = "aGk=";
+    result.content.push_back(std::move(block));
+    return Result<ToolOutcome>(ToolOutcome(std::move(result)));
+  });
+
+  auto dispatcher = makeDispatcher(registry);
+  auto response = dispatcher.dispatch(
+      request("tools/call", Json{{"name", "bad-image"},
+                                 {"arguments", Json::object()}}),
+      kV2026);
+  REQUIRE(response.has_value());
+  REQUIRE(response->error.has_value());
+  CHECK(response->error->data.at("reason") == "invalid_content_block");
+}

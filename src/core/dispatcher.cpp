@@ -87,6 +87,11 @@ Result<Json> contentBlockToJson(const ContentBlock& block) {
     break;
   case ContentType::Image:
   case ContentType::Audio:
+    if (block.dataBase64.empty() || block.mimeType.empty()) {
+      return Result<Json>::failure(McpError::make(
+          ErrorCode::InternalError, "invalid content block",
+          Json{{"reason", "invalid_content_block"}}));
+    }
     item["data"] = block.dataBase64;
     item["mimeType"] = block.mimeType;
     break;
@@ -736,7 +741,7 @@ std::optional<Message> Dispatcher::dispatch(
       }
 
       if (!response.error.has_value()) {
-        Json result;
+        Json result = completeResult(is2026);
         result["protocolVersion"] = requested;
         result["capabilities"] =
             capabilities(config_, resources_, prompts_, requested == kWire2026);

@@ -37,8 +37,9 @@ public:
 
 // Streamable HTTP server. Each POST is routed independently; concurrent
 // clients may reuse JSON-RPC ids safely. Each open SSE stream parks one
-// cpp-httplib worker thread, so the server's thread pool is sized above
-// maxConcurrentStreams to keep JSON traffic responsive.
+// cpp-httplib worker thread; the pool is sized above maxConcurrentStreams
+// (max(8, maxConcurrentStreams + 4), or 16 workers when
+// maxConcurrentStreams == 0) to keep JSON traffic responsive.
 struct StreamableHttpServerOptions {
   std::string bind = "127.0.0.1";
   int port = 0;

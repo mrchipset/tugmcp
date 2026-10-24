@@ -657,3 +657,25 @@ TEST_CASE("cancelling one call keeps subscriptions and other calls alive") {
   client.close();
   running.stop();
 }
+TEST_CASE("cancelPending before send short-circuits the request") {
+  StreamableHttpClientOptions transport_options;
+  transport_options.baseUrl = "http://127.0.0.1:1";
+  transport_options.protocolVersion = "2026-07-28";
+  auto created = mcp::v1::makeStreamableHttpClientTransport(transport_options);
+  REQUIRE(created.hasValue());
+  std::shared_ptr<ITransport> transport = created.value();
+  REQUIRE(transport->start().ok);
+
+  RequestId id;
+  id.value = std::int64_t{77};
+  transport->cancelPending(id);
+
+  const Json request = Json{{"jsonrpc", "2.0"},
+                            {"id", 77},
+                            {"method", "ping"},
+                            {"params", Json::object()}};
+  const Status sent = transport->send(request);
+  REQUIRE_FALSE(sent.ok);
+  CHECK(sent.error.data.at("reason") == "cancelled");
+  transport->close();
+}

@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -412,6 +413,14 @@ public:
         return Status::failure(
             reasonError("transport is not started", "network_error"));
       }
+      if (has_request_id) {
+        const auto it = cancelled_before_send_.find(request_id);
+        if (it != cancelled_before_send_.end()) {
+          cancelled_before_send_.erase(it);
+          return Status::failure(
+              reasonError("request cancelled", "cancelled"));
+        }
+      }
       active_clients_.push_back(client);
       if (has_request_id) {
         active_by_id_[request_id] = client;
@@ -545,6 +554,12 @@ public:
       if (it != active_by_id_.end()) {
         client = it->second.lock();
       }
+      if (!client) {
+        if (cancelled_before_send_.size() > 1024) {
+          cancelled_before_send_.clear();
+        }
+        cancelled_before_send_.insert(id);
+      }
     }
     if (client) {
       try {
@@ -578,6 +593,7 @@ public:
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       closed_ = true;
       started_ = false;
+      cancelled_before_send_.clear();
       if (client_) {
         clients.push_back(std::move(client_));
         client_.reset();
@@ -664,6 +680,7 @@ private:
   std::unordered_map<RequestId, std::weak_ptr<httplib::Client>,
                      std::hash<RequestId>>
       active_by_id_;
+  std::unordered_set<RequestId, std::hash<RequestId>> cancelled_before_send_;
 
   std::mutex callback_mutex_;
   std::function<void(Json)> on_message_;

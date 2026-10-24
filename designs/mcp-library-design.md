@@ -477,7 +477,7 @@ struct ToolResult {
 struct InputRequired {
     std::optional<Json> inputRequests;      // 需要客户端补充的输入
     std::optional<std::string> requestState; // 服务端状态，客户端必须原样回传
-    bool valid() const { return inputRequests.has_value() || requestState.has_value(); }
+    bool valid() const { return inputRequests.has_value() && requestState.has_value(); }
 };
 template <class T>
 struct OperationOutcome { std::variant<T, InputRequired> value; };
@@ -486,7 +486,7 @@ using ResourceOutcome = OperationOutcome<ResourceContent>;
 using PromptOutcome = OperationOutcome<PromptResult>;
 ```
 
-`ToolResult`/`ResourceContent`/`PromptResult` 与 `InputRequired` 用 `OperationOutcome<T>` 包装；`InputRequired` 的 `inputRequests`/`requestState` **至少一个存在**。**MRTR 重试是客户端发起的新请求，新 JSON-RPC id 由客户端选择**，服务端不指定 id；库只负责编码/路由，不决定业务。
+`ToolResult`/`ResourceContent`/`PromptResult` 与 `InputRequired` 用 `OperationOutcome<T>` 包装；`InputRequired` 的 `inputRequests`/`requestState` **必须同时存在**（缺任一则无法完成 MRTR 重试）。**MRTR 重试是客户端发起的新请求，新 JSON-RPC id 由客户端选择**，服务端不指定 id；库只负责编码/路由，不决定业务。
 
 ### 7.4 严格 JSON
 

@@ -23,8 +23,9 @@ enum class ResultType { Complete, InputRequired };
 
 std::string_view toString(ResultType type) noexcept;
 
-// Multi-round-trip request payload. At least one field must be present; an
-// invalid value is a handler bug and is reported as an internal error.
+// Multi-round-trip request payload. Both fields must be present so a retry can
+// round-trip the server state; an invalid value is a handler bug and is reported
+// as an internal error.
 struct InputRequired {
   std::optional<Json> inputRequests;
   std::optional<std::string> requestState;
