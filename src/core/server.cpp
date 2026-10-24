@@ -1,4 +1,4 @@
-﻿#include "tugmcp/server.hpp"
+#include "tugmcp/server.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -137,6 +137,7 @@ Status McpServer::run() {
   config.serverName = options_.name;
   config.serverVersion = options_.version;
   config.instructions = options_.instructions;
+  config.supportedVersions = options_.supportedVersions;
   config.supportsSubscriptions = transport_->supportsStreaming();
   // Declared before the cleanup guard so queued tasks always see a live
   // dispatcher: guard cleanup drains the executor before this object dies.
@@ -182,6 +183,7 @@ Status McpServer::run() {
     }
     try {
       transport_->setOnRouteClosed(nullptr);
+      transport_->setOnSessionClosed(nullptr);
       transport_->setOnMessageEx(nullptr);
       transport_->setOnMessage(nullptr);
       transport_->setOnError(nullptr);
@@ -273,6 +275,12 @@ Status McpServer::run() {
               if (!pending) {
                 return;
               }
+              if (pending->sessionId != metadata.sessionId) {
+                record_error(McpError::make(
+                    ErrorCode::InternalError, "session mismatch",
+                    Json{{"reason", "session_mismatch"}}));
+                return;
+              }
               {
                 std::lock_guard<std::mutex> lock(pending->mutex);
                 if (pending->done) {
@@ -296,13 +304,22 @@ Status McpServer::run() {
                   RequestId::fromJson(decoded.value().params.at("requestId"));
               if (request_id.hasValue()) {
                 const std::string suffix = request_id.value().toJson().dump();
+                const std::string session_prefix =
+                    metadata.sessionId + "\x1f";
                 std::vector<std::shared_ptr<CancellationToken>> tokens;
                 {
                   std::lock_guard<std::mutex> lock(mutex_);
                   for (const auto& item : cancellation_tokens_) {
-                    if (item.first.size() >= suffix.size() &&
+                    const bool suffix_match =
+                        item.first.size() >= suffix.size() &&
                         item.first.compare(item.first.size() - suffix.size(),
-                                           suffix.size(), suffix) == 0) {
+                                           suffix.size(), suffix) == 0;
+                    if (!suffix_match) {
+                      continue;
+                    }
+                    if (metadata.sessionId.empty() ||
+                        item.first.compare(0, session_prefix.size(),
+                                           session_prefix) == 0) {
                       tokens.push_back(item.second);
                     }
                   }
@@ -414,7 +431,8 @@ Status McpServer::run() {
           const bool is_request = message.kind == MessageKind::Request;
           const RequestId request_id = message.id;
           const std::string token_key =
-              metadata.route + "\x1f" + request_id.toJson().dump();
+              metadata.sessionId + "\x1f" + metadata.route + "\x1f" +
+              request_id.toJson().dump();
           std::shared_ptr<CancellationToken> token =
               std::make_shared<CancellationToken>();
           if (is_request) {
@@ -541,6 +559,8 @@ Status McpServer::run() {
 
     transport_->setOnRouteClosed(
         [this](const std::string& route) { handleRouteClosed(route); });
+    transport_->setOnSessionClosed(
+        [this](const std::string& id) { handleSessionClosed(id); });
 
     Status started = transport_->start();
     if (!started) {
@@ -625,7 +645,11 @@ void McpServer::notifyResourceUpdated(std::string_view uri) {
     } catch (...) {
     }
     if (!sent) {
-      {
+      const bool route_gone =
+          sent.error.data.is_object() &&
+          sent.error.data.contains("reason") &&
+          sent.error.data.at("reason") == "route_not_found";
+      if (!route_gone) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_error_ = sent.error;
       }
@@ -661,7 +685,11 @@ void McpServer::notifyListChanged(ListKind kind) {
     } catch (...) {
     }
     if (!sent) {
-      {
+      const bool route_gone =
+          sent.error.data.is_object() &&
+          sent.error.data.contains("reason") &&
+          sent.error.data.at("reason") == "route_not_found";
+      if (!route_gone) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_error_ = sent.error;
       }
@@ -677,12 +705,12 @@ std::size_t McpServer::activeSubscriptions() const {
 
 void McpServer::handleRouteClosed(const std::string& route) {
   std::vector<std::shared_ptr<CancellationToken>> tokens;
-  const std::string prefix = route + "\x1f";
+  const std::string needle = "\x1f" + route + "\x1f";
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = cancellation_tokens_.begin();
          it != cancellation_tokens_.end();) {
-      if (it->first.compare(0, prefix.size(), prefix) == 0) {
+      if (it->first.find(needle) != std::string::npos) {
         tokens.push_back(it->second);
         it = cancellation_tokens_.erase(it);
       } else {
@@ -720,6 +748,7 @@ Result<Json> McpServer::requestClient(std::string_view sessionId,
   RequestId id;
   id.value = numeric_id;
   auto pending = std::make_shared<PendingClientResponse>();
+  pending->sessionId = std::string(sessionId);
   {
     std::lock_guard<std::mutex> lock(server_requests_mutex_);
     server_requests_[id] = pending;
@@ -791,6 +820,33 @@ Status McpServer::sendNotification(std::string_view sessionId,
   return transport_->sendToSession(sessionId, notification);
 }
 
+void McpServer::handleSessionClosed(const std::string& sessionId) {
+  std::vector<std::shared_ptr<PendingClientResponse>> pending_requests;
+  {
+    std::lock_guard<std::mutex> lock(server_requests_mutex_);
+    for (auto it = server_requests_.begin(); it != server_requests_.end();) {
+      if (it->second->sessionId == sessionId) {
+        pending_requests.push_back(it->second);
+        it = server_requests_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (const auto& pending : pending_requests) {
+    {
+      std::lock_guard<std::mutex> lock(pending->mutex);
+      if (pending->done) {
+        continue;
+      }
+      pending->done = true;
+      pending->error = McpError::make(
+          ErrorCode::InternalError, "session closed",
+          Json{{"reason", "session_closed"}});
+    }
+    pending->cv.notify_all();
+  }
+}
 void McpServer::completeServerRequests(const McpError& error) noexcept {
   try {
     std::vector<std::shared_ptr<PendingClientResponse>> pending_requests;

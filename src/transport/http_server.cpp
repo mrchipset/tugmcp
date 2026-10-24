@@ -260,10 +260,6 @@ public:
       auto& session = it->second;
       event.id = session->next_event_id++;
       event.message = message;
-      session->replay.push_back(event);
-      while (session->replay.size() > 256) {
-        session->replay.pop_front();
-      }
       session->last_seen = now();
       stream = session->stream;
     }
@@ -276,6 +272,16 @@ public:
       }
       stream->frames.push_back(event);
       stream->cv.notify_all();
+    }
+    {
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      const auto it = sessions_.find(std::string(sessionId));
+      if (it != sessions_.end()) {
+        it->second->replay.push_back(event);
+        while (it->second->replay.size() > 256) {
+          it->second->replay.pop_front();
+        }
+      }
     }
     return Status::success();
   }
@@ -305,6 +311,11 @@ public:
     on_route_closed_ = std::move(handler);
   }
 
+  void setOnSessionClosed(std::function<void(const std::string&)> handler) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    on_session_closed_ = std::move(handler);
+  }
+
   void close() noexcept {
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
       notifyClose();
@@ -314,6 +325,7 @@ public:
     std::vector<std::shared_ptr<SseStream>> streams;
     std::vector<std::shared_ptr<GetStream>> get_streams;
     std::vector<std::string> pending_routes;
+    std::vector<std::string> session_ids;
     {
       std::lock_guard<std::mutex> lock(routes_mutex_);
       for (auto& item : pending_) {
@@ -335,7 +347,14 @@ public:
     }
     {
       std::lock_guard<std::mutex> lock(sessions_mutex_);
+      session_ids.reserve(sessions_.size());
+      for (const auto& item : sessions_) {
+        session_ids.push_back(item.first);
+      }
       sessions_.clear();
+    }
+    for (const auto& id : session_ids) {
+      notifySessionClosed(id);
     }
     pending_cv_.notify_all();
     for (const auto& route : pending_routes) {
@@ -484,6 +503,7 @@ private:
       return;
     }
     std::vector<std::shared_ptr<GetStream>> expired;
+    std::vector<std::string> expired_ids;
     {
       std::lock_guard<std::mutex> lock(sessions_mutex_);
       const auto current = now();
@@ -493,6 +513,7 @@ private:
           if (it->second->stream) {
             expired.push_back(it->second->stream);
           }
+          expired_ids.push_back(it->first);
           it = sessions_.erase(it);
         } else {
           ++it;
@@ -501,6 +522,9 @@ private:
     }
     for (const auto& stream : expired) {
       closeGetStream(stream);
+    }
+    for (const auto& id : expired_ids) {
+      notifySessionClosed(id);
     }
   }
 
@@ -541,6 +565,7 @@ private:
       sessions_.erase(it);
     }
     closeGetStream(stream);
+    notifySessionClosed(id);
   }
 
   void releaseGetStream(const std::string& route,
@@ -582,6 +607,12 @@ private:
           });
         }
         if (stream->closed) {
+          return false;
+        }
+        if (stream->frames.empty() && sink.is_writable &&
+            !sink.is_writable()) {
+          stream->closed = true;
+          stream->cv.notify_all();
           return false;
         }
         if (!stream->frames.empty()) {
@@ -690,9 +721,24 @@ private:
         previous = current->stream;
         current->stream = stream;
       }
-      closeGetStream(previous);
 
-      {
+      const std::uint64_t max_replay =
+          replay.empty() ? 0 : replay.back().id;
+      if (previous) {
+        std::unique_lock<std::mutex> old_lock(previous->mutex);
+        std::lock_guard<std::mutex> new_lock(stream->mutex);
+        for (auto& event : replay) {
+          stream->frames.push_back(std::move(event));
+        }
+        for (auto& event : previous->frames) {
+          if (event.id > max_replay) {
+            stream->frames.push_back(std::move(event));
+          }
+        }
+        previous->frames.clear();
+        old_lock.unlock();
+        closeGetStream(previous);
+      } else {
         std::lock_guard<std::mutex> lock(stream->mutex);
         for (auto& event : replay) {
           stream->frames.push_back(std::move(event));
@@ -794,6 +840,20 @@ private:
               current, current + 1, std::memory_order_acq_rel,
               std::memory_order_acquire)) {
         return true;
+      }
+    }
+  }
+
+  void notifySessionClosed(const std::string& session_id) noexcept {
+    std::function<void(const std::string&)> handler;
+    {
+      std::lock_guard<std::mutex> lock(callback_mutex_);
+      handler = on_session_closed_;
+    }
+    if (handler) {
+      try {
+        handler(session_id);
+      } catch (...) {
       }
     }
   }
@@ -990,6 +1050,7 @@ private:
       on_error_ = nullptr;
       on_close_ = nullptr;
       on_route_closed_ = nullptr;
+      on_session_closed_ = nullptr;
     }
     if (!notify || !handler) {
       return;
@@ -1082,7 +1143,8 @@ private:
       }
 
       const Message& message = decoded.value();
-      const bool is_2025 = version == "2025-11-25";
+      const bool is_2025 =
+          version.empty() || version == "2025-11-25";
       if (message.kind == MessageKind::Response && !is_2025) {
         respondError(response, 400,
                      McpError::make(ErrorCode::InvalidRequest,
@@ -1382,6 +1444,7 @@ private:
   std::function<void(McpError)> on_error_;
   std::function<void()> on_close_;
   std::function<void(const std::string&)> on_route_closed_;
+  std::function<void(const std::string&)> on_session_closed_;
 
   std::mutex routes_mutex_;
   std::condition_variable pending_cv_;
@@ -1438,6 +1501,11 @@ void HttpServerTransport::setOnClose(std::function<void()> handler) {
 void HttpServerTransport::setOnRouteClosed(
     std::function<void(const std::string&)> handler) {
   impl_->setOnRouteClosed(std::move(handler));
+}
+
+void HttpServerTransport::setOnSessionClosed(
+    std::function<void(const std::string&)> handler) {
+  impl_->setOnSessionClosed(std::move(handler));
 }
 
 void HttpServerTransport::close() { impl_->close(); }

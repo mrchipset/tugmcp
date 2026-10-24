@@ -76,6 +76,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnSessionClosed(std::move(handler));
+  }
   void close() override { inner_->close(); }
   void waitReady() { ready_.get_future().wait(); }
 
@@ -485,6 +489,59 @@ TEST_CASE("expired sessions return 404") {
                              "application/json");
   REQUIRE(expired);
   CHECK(expired->status == 404);
+  client.stop();
+  running.stop();
+}
+TEST_CASE("failed session send is not replayed after opening a stream") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+  const std::string session_id = initializeSession(running.port());
+
+  REQUIRE_FALSE(running.server()
+                    .sendNotification(session_id, "notifications/message",
+                                      Json{{"data", "failed-event"}})
+                    .ok);
+
+  httplib::Headers headers = sessionHeaders(session_id);
+  Reader reader;
+  startReader(running.port(), headers, reader);
+  REQUIRE(ensureStreamOpen(running.server(), session_id));
+  REQUIRE(waitForText(reader, "notifications/message",
+                      std::chrono::seconds(2)));
+  CHECK(readerSnapshot(reader).find("failed-event") == std::string::npos);
+
+  running.stop();
+  if (reader.thread.joinable()) {
+    reader.thread.join();
+  }
+}
+
+TEST_CASE("initialize without version header still creates a session") {
+  RunningServer running(StreamableHttpServerOptions{});
+  running.start();
+
+  httplib::Client client(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("Accept", "application/json");
+  auto initialized = client.Post("/mcp", headers, initializeBody().dump(),
+                                 "application/json");
+  REQUIRE(initialized);
+  REQUIRE(initialized->status == 200);
+  const std::string session_id =
+      initialized->get_header_value("MCP-Session-Id");
+  REQUIRE(session_id.size() == 32);
+
+  const Json body = Json{{"jsonrpc", "2.0"},
+                         {"id", 3},
+                         {"method", "tools/list"},
+                         {"params", Json::object()}};
+  auto missing = client.Post("/mcp", headers, body.dump(),
+                             "application/json");
+  REQUIRE(missing);
+  CHECK(missing->status == 400);
+  CHECK(Json::parse(missing->body).at("error").at("data").at("reason") ==
+        "missing_session");
+
   client.stop();
   running.stop();
 }

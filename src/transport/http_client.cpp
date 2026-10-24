@@ -629,6 +629,12 @@ public:
 
   bool supportsServerStream() const override { return true; }
 
+  Status setProtocolVersion(std::string_view version) override {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    options_.protocolVersion = std::string(version);
+    return Status::success();
+  }
+
   std::string sessionId() const override {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     return session_id_;
@@ -649,13 +655,21 @@ public:
           ErrorCode::InternalError, "missing session id",
           Json{{"reason", "missing_session"}}));
     }
+    std::thread finished;
     {
       std::lock_guard<std::mutex> lock(stream_control_mutex_);
       if (stream_thread_.joinable()) {
-        return Status::success();
+        if (stream_running_.load(std::memory_order_acquire)) {
+          return Status::success();
+        }
+        finished = std::move(stream_thread_);
       }
       stream_stop_.store(false, std::memory_order_release);
+      stream_running_.store(true, std::memory_order_release);
       stream_thread_ = std::thread([this, session] { streamLoop(session); });
+    }
+    if (finished.joinable()) {
+      finished.join();
     }
     return Status::success();
   }
@@ -684,6 +698,7 @@ public:
     if (thread.joinable()) {
       thread.join();
     }
+    stream_running_.store(false, std::memory_order_release);
   }
 
   void close() noexcept {
@@ -773,12 +788,19 @@ private:
       if (stream_stop_.load(std::memory_order_acquire)) {
         break;
       }
+      if (result && (result->status == 404 || result->status == 405)) {
+        reportError(McpError::make(
+            ErrorCode::InternalError, "stream request rejected",
+            Json{{"reason", "http_status"}, {"status", result->status}}));
+        break;
+      }
       if (result && result->status == 200) {
         backoff = std::chrono::milliseconds(100);
       }
       waitForStop(backoff);
       backoff = nextBackoff(backoff);
     }
+    stream_running_.store(false, std::memory_order_release);
   }
 
   static std::chrono::milliseconds nextBackoff(
@@ -867,6 +889,7 @@ private:
   std::mutex stream_control_mutex_;
   std::thread stream_thread_;
   std::atomic<bool> stream_stop_{false};
+  std::atomic<bool> stream_running_{false};
 
   std::vector<std::weak_ptr<httplib::Client>> active_clients_;
   std::unordered_map<RequestId, std::weak_ptr<httplib::Client>,

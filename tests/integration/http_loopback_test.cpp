@@ -316,7 +316,10 @@ TEST_CASE("concurrent requests may reuse a JSON-RPC id across routes") {
   };
   auto post = [&started](const std::string& body) {
     httplib::Client client(baseUrlFor(started.port));
-    auto response = client.Post("/mcp", body, "application/json");
+    httplib::Headers headers;
+    headers.emplace("MCP-Protocol-Version", "2026-07-28");
+    headers.emplace("Mcp-Method", "ping");
+    auto response = client.Post("/mcp", headers, body, "application/json");
     PostResult result;
     if (response) {
       result.status = response->status;

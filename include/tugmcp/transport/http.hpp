@@ -76,6 +76,8 @@ public:
   void setOnClose(std::function<void()> handler) override;
   void setOnRouteClosed(
       std::function<void(const std::string&)> handler) override;
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) override;
   bool supportsStreaming() const override { return true; }
   void close() override;
 

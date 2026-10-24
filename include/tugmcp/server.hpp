@@ -27,6 +27,8 @@ struct ServerOptions {
   std::string name = "tugmcp";
   std::string version = "0.1.0";
   std::string instructions;
+  std::vector<std::string> supportedVersions{"2026-07-28",
+                                               "2025-11-25"};
   std::shared_ptr<ITimeSource> timeSource;
 
   // Optional resource and prompt providers. At most one provider per kind is
@@ -42,7 +44,8 @@ struct ServerOptions {
   // D17: a null executor means the server creates an internal thread pool
   // (4 workers, 1024 queued tasks) and drains it on run() exit. Inject your own
   // executor to share capacity with the host. Set useInlineExecutor to keep the
-  // legacy synchronous dispatch on the transport thread.
+  // legacy synchronous dispatch on the transport thread. Precedence: a non-null
+  // executor always wins over useInlineExecutor.
   std::shared_ptr<IExecutor> executor;
   bool useInlineExecutor = false;
 };
@@ -91,7 +94,9 @@ private:
   void clearSubscriptions() noexcept;
   void handleRouteClosed(const std::string& route);
   void completeServerRequests(const McpError& error) noexcept;
+  void handleSessionClosed(const std::string& sessionId);
   struct PendingClientResponse {
+    std::string sessionId;
     std::mutex mutex;
     std::condition_variable cv;
     bool done = false;

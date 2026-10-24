@@ -144,6 +144,11 @@ public:
       if (!options_.allow2025Fallback || !fallback_eligible) {
         return Status::failure(discovered.error());
       }
+      Status switched = transport_->setProtocolVersion("2025-11-25");
+      if (!switched) {
+        return switched;
+      }
+      options_.protocolVersion = "2025-11-25";
     }
 
     return initialize();
@@ -175,7 +180,8 @@ public:
           failureWithReason("failed to send initialized", "send_failed"));
     }
 
-    if (options_.autoOpenStream && transport_->supportsServerStream()) {
+    if (options_.autoOpenStream && options_.protocolVersion == "2025-11-25" &&
+        transport_->supportsServerStream()) {
       Status opened = transport_->openStream();
       if (!opened) {
         const bool unsupported =
@@ -404,6 +410,9 @@ public:
     if (timed_out) {
       if (pending->cancellation) {
         pending->cancellation->cancel();
+      }
+      if (options_.protocolVersion == "2025-11-25") {
+        sendCancellationNotification(request_id);
       }
       cancelTransport(request_id);
       parkSender(sender);

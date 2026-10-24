@@ -7,6 +7,8 @@
 #include <tugmcp/tool.hpp>
 #include <tugmcp/transport/http.hpp>
 
+#include "tugmcp/detail/http_httplib.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -89,6 +91,10 @@ public:
   void setOnRouteClosed(
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
+  }
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnSessionClosed(std::move(handler));
   }
   void close() override { inner_->close(); }
   void waitReady() { ready_.get_future().wait(); }
@@ -335,12 +341,27 @@ TEST_CASE("2025 client stream reconnect replays missed notifications") {
   REQUIRE(capture.waitCount(1, std::chrono::seconds(2)));
 
   client.closeStream();
-  REQUIRE(running.server()
-              .sendNotification(client.sessionId(), "notifications/message",
-                                Json{{"data", "second"}})
-              .ok);
+
+  // Re-establish a server-side stream without the client, emit event 2 into
+  // the replay buffer, then reconnect the real client with Last-Event-ID 1.
+  std::thread raw_reader([&] {
+    httplib::Client raw(baseUrlFor(running.port()));
+    raw.set_read_timeout(std::chrono::seconds(10));
+    httplib::Headers raw_headers;
+    raw_headers.emplace("Accept", "text/event-stream");
+    raw_headers.emplace("MCP-Protocol-Version", "2025-11-25");
+    raw_headers.emplace("MCP-Session-Id", client.sessionId());
+    raw_headers.emplace("Last-Event-ID", "1");
+    raw.Get("/mcp", raw_headers,
+            [](const char*, std::size_t) { return true; });
+    raw.stop();
+  });
+
+  REQUIRE(sendNotificationWithRetry(
+      running.server(), client.sessionId(), Json{{"data", "second"}}));
   REQUIRE(client.openStream().ok);
   REQUIRE(capture.waitCount(2, std::chrono::seconds(2)));
+  raw_reader.join();
 
   const auto notifications = capture.snapshot();
   REQUIRE(notifications.size() == 2);
@@ -412,6 +433,266 @@ TEST_CASE("2025 unknown client handler returns MethodNotFound") {
   REQUIRE_FALSE(result.hasValue());
   CHECK(static_cast<int>(result.error().code) ==
         static_cast<int>(ErrorCode::MethodNotFound));
+
+  client.close();
+  running.stop();
+}
+TEST_CASE("session A remains uncancelled when session B cancels id 1") {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  RunningServer running(options);
+
+  std::atomic<bool> a_observed{false};
+  std::atomic<bool> b_observed{false};
+  std::promise<void> a_entered;
+  auto a_entered_future = a_entered.get_future();
+  std::promise<void> b_entered;
+  auto b_entered_future = b_entered.get_future();
+  addTool(running.server(), "block-a",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            a_entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            a_observed.store(true);
+            return textOutcome("a");
+          });
+  addTool(running.server(), "block-b",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            b_entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            b_observed.store(true);
+            return textOutcome("b");
+          });
+  running.start();
+
+  auto client_a_storage = makeClient(running.port());
+  McpClient& client_a = *client_a_storage;
+  auto client_b_storage = makeClient(running.port());
+  McpClient& client_b = *client_b_storage;
+  REQUIRE(client_a.connect().ok);
+  REQUIRE(client_b.connect().ok);
+
+  RequestId id_a;
+  CallOptions options_a;
+  options_a.out_id = &id_a;
+  std::optional<Result<Json>> outcome_a;
+  std::thread caller_a([&] {
+    outcome_a = client_a.callTool("block-a", Json::object(), options_a);
+  });
+  a_entered_future.wait();
+
+  RequestId id_b;
+  CallOptions options_b;
+  options_b.out_id = &id_b;
+  std::optional<Result<Json>> outcome_b;
+  std::thread caller_b([&] {
+    outcome_b = client_b.callTool("block-b", Json::object(), options_b);
+  });
+  b_entered_future.wait();
+
+  REQUIRE(client_b.cancel(id_b, mcp::v1::CancelMode::Notification).ok);
+  caller_b.join();
+  REQUIRE(outcome_b.has_value());
+  REQUIRE_FALSE(outcome_b->hasValue());
+  CHECK(outcome_b->error().data.at("reason") == "cancelled");
+  {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!b_observed.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  CHECK(b_observed.load());
+  CHECK_FALSE(a_observed.load());
+
+  REQUIRE(client_a.cancel(id_a, mcp::v1::CancelMode::Notification).ok);
+  caller_a.join();
+  {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!a_observed.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  CHECK(a_observed.load());
+
+  client_a.close();
+  client_b.close();
+  running.stop();
+}
+
+TEST_CASE("response posted by another session does not complete A") {
+  ServerOptions options;
+  RunningServer running(options);
+  running.start();
+
+  auto client_a_storage = makeClient(running.port());
+  McpClient& client_a = *client_a_storage;
+  auto client_b_storage = makeClient(running.port());
+  McpClient& client_b = *client_b_storage;
+  std::promise<void> handler_entered;
+  auto handler_entered_future = handler_entered.get_future();
+  std::promise<void> release_handler;
+  auto release_future = release_handler.get_future();
+  client_a.setRequestHandler("roots/list",
+                             [&](const Json&) {
+                               handler_entered.set_value();
+                               release_future.wait();
+                               return Result<Json>(
+                                   Json{{"roots", Json::array()}});
+                             });
+  REQUIRE(client_a.connect().ok);
+  REQUIRE(client_b.connect().ok);
+  REQUIRE(waitForStream(running.server(), client_a.sessionId()));
+
+  auto future = std::async(std::launch::async, [&] {
+    return running.server().requestClient(
+        client_a.sessionId(), "roots/list", Json::object(),
+        std::chrono::milliseconds(500));
+  });
+  handler_entered_future.wait();
+
+  httplib::Client raw(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("MCP-Session-Id", client_b.sessionId());
+  const Json response = Json{{"jsonrpc", "2.0"},
+                             {"id", 1},
+                             {"result", Json{{"roots", Json::array()}}}};
+  auto posted = raw.Post("/mcp", headers, response.dump(),
+                         "application/json");
+  REQUIRE(posted);
+  CHECK(posted->status == 202);
+
+  auto result = future.get();
+  REQUIRE_FALSE(result.hasValue());
+  CHECK(result.error().data.at("reason") == "timeout");
+  const auto last_error = running.server().lastError();
+  REQUIRE(last_error.has_value());
+  CHECK(last_error->data.at("reason") == "session_mismatch");
+
+  release_handler.set_value();
+  client_a.close();
+  client_b.close();
+  running.stop();
+}
+
+TEST_CASE("DELETE completes pending server requests with session_closed") {
+  ServerOptions options;
+  RunningServer running(options);
+  running.start();
+
+  auto client_storage = makeClient(running.port());
+  McpClient& client = *client_storage;
+  std::promise<void> handler_entered;
+  auto handler_entered_future = handler_entered.get_future();
+  std::promise<void> release_handler;
+  auto release_future = release_handler.get_future();
+  client.setRequestHandler("roots/list",
+                           [&](const Json&) {
+                             handler_entered.set_value();
+                             release_future.wait();
+                             return Result<Json>(
+                                 Json{{"roots", Json::array()}});
+                           });
+  REQUIRE(client.connect().ok);
+  REQUIRE(waitForStream(running.server(), client.sessionId()));
+
+  auto future = std::async(std::launch::async, [&] {
+    return running.server().requestClient(
+        client.sessionId(), "roots/list", Json::object(),
+        std::chrono::seconds(2));
+  });
+  handler_entered_future.wait();
+
+  httplib::Client raw(baseUrlFor(running.port()));
+  httplib::Headers headers;
+  headers.emplace("MCP-Protocol-Version", "2025-11-25");
+  headers.emplace("MCP-Session-Id", client.sessionId());
+  auto removed = raw.Delete("/mcp", headers);
+  REQUIRE(removed);
+  CHECK(removed->status == 204);
+
+  auto result = future.get();
+  REQUIRE_FALSE(result.hasValue());
+  CHECK(result.error().data.at("reason") == "session_closed");
+
+  release_handler.set_value();
+  client.close();
+  running.stop();
+}
+
+TEST_CASE("2026-preferring client falls back to a 2025-only server") {
+  ServerOptions options;
+  options.supportedVersions = {"2025-11-25"};
+  RunningServer running(options);
+  addTool(running.server(), "echo",
+          [](const Json&, RequestContext&, IProgressSink&) {
+            return textOutcome("ok");
+          });
+  running.start();
+
+  StreamableHttpClientOptions transport_options;
+  transport_options.baseUrl = baseUrlFor(running.port());
+  transport_options.requestTimeout = std::chrono::milliseconds(5000);
+  transport_options.protocolVersion = "2026-07-28";
+  auto transport = makeStreamableHttpClientTransport(transport_options);
+  REQUIRE(transport.hasValue());
+  ClientOptions client_options;
+  client_options.timeoutMs = 5000;
+  client_options.protocolVersion = "2026-07-28";
+  client_options.allow2025Fallback = true;
+  McpClient client(client_options, transport.value());
+
+  REQUIRE(client.connect().ok);
+  CHECK_FALSE(client.sessionId().empty());
+  auto listed = client.listTools();
+  REQUIRE(listed.hasValue());
+  CHECK(listed.value().at("tools").at(0).at("name") == "echo");
+
+  client.close();
+  running.stop();
+}
+
+TEST_CASE("2025 per-call timeout notifies the server") {
+  ServerOptions options;
+  options.allowUnvalidatedTools = true;
+  RunningServer running(options);
+  std::promise<void> entered;
+  auto entered_future = entered.get_future();
+  std::promise<void> observed;
+  auto observed_future = observed.get_future();
+  addTool(running.server(), "slow",
+          [&](const Json&, RequestContext& context, IProgressSink&) {
+            entered.set_value();
+            while (context.cancellation &&
+                   !context.cancellation->cancelled()) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            observed.set_value();
+            return textOutcome("late");
+          });
+  running.start();
+
+  auto client_storage = makeClient(running.port());
+  McpClient& client = *client_storage;
+  REQUIRE(client.connect().ok);
+
+  CallOptions call_options;
+  call_options.timeout = std::chrono::milliseconds(100);
+  auto timed_out = client.callTool("slow", Json::object(), call_options);
+  entered_future.wait();
+  REQUIRE_FALSE(timed_out.hasValue());
+  CHECK(timed_out.error().data.at("reason") == "timeout");
+  CHECK(observed_future.wait_for(std::chrono::seconds(2)) ==
+        std::future_status::ready);
 
   client.close();
   running.stop();

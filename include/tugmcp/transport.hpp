@@ -72,6 +72,13 @@ public:
   virtual std::string sessionId() const { return {}; }
   virtual bool supportsServerStream() const { return false; }
 
+  // Update the protocol version used by subsequent sends (client transports).
+  virtual Status setProtocolVersion(std::string_view) {
+    return Status::success();
+  }
+
+  // Optional notification that a server session is gone.
+  virtual void setOnSessionClosed(std::function<void(const std::string&)>) {}
   // Optional notification that a transport route is gone. Single-route
   // transports may leave this unset.
   virtual void setOnRouteClosed(std::function<void(const std::string&)>) {}

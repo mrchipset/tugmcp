@@ -97,6 +97,10 @@ public:
       std::function<void(const std::string&)> handler) override {
     inner_->setOnRouteClosed(std::move(handler));
   }
+  void setOnSessionClosed(
+      std::function<void(const std::string&)> handler) override {
+    inner_->setOnSessionClosed(std::move(handler));
+  }
 
   void setOnClose(std::function<void()> handler) override {
     inner_->setOnClose(std::move(handler));
