@@ -23,7 +23,8 @@
 | D13 | 纯 C++ 工具链：CMake ≥3.20 唯一构建系统；MSVC 2019 16.8+/GCC 9+/Clang 10+；不提供其它构建系统适配 | 已定 |
 | D14 | TLS 为构建开关（`TUGMCP_TLS`，默认 OFF；OpenSSL ≥3.0）；宏只经 `tugmcp::http` 传播 | 已定 |
 | D15 | 第三方依赖固定在 `3rd/`，手写 INTERFACE target；默认不用系统包、不用 FetchContent | 已定 |
-| D16 | M1 临时：无 `IExecutor`，handler 在 transport reader 线程同步执行；M5 替换 | 临时 |
+| D16 | M1 临时：无 `IExecutor`，handler 在 transport reader 线程同步执行；M5 替换 | 部分取代（D17） |
+| D17 | `IExecutor` 公共契约冻结；默认执行器在 P2b 保持 `nullptr`，P3 切换为内部线程池 | 已定 |
 
 ## D1 — 2026 主、2025 回退
 
@@ -225,6 +226,27 @@
 - 客户端超时只让本次调用返回 `timeout`，不会中断服务端 handler。
 - 替换点明确：M5 引入 `IExecutor` 后，dispatcher 改为投递任务，`CancellationToken` 由 executor/取消路由置位。
 - 这是临时状态：M1 之后不得在其它路径复制「IO 线程直接执行 handler」。
+
+## D17 — `IExecutor` 契约冻结与默认执行器
+
+**背景**：P2a 已提前引入 `IExecutor`（早于原 M5）。Gate 2a 评审要求在下游（SSE、订阅、2025 session）依赖它之前冻结接口形状；同时 `ServerOptions::executor` 默认仍为 `nullptr`，与主设计 §14「默认内部线程池」不一致。
+
+**决策**：
+- 接口（`include/tugmcp/executor.hpp`）冻结为：
+  - `post(std::function<void()>, Priority) noexcept`：线程安全、非阻塞、不抛异常；同优先级 FIFO；`Emergency` 绕过容量上限（准入/安全路径），但 `drain`/`stop` 之后仍返回 `RejectedStopped`；容量只统计排队（不含运行中）。
+  - `drain() noexcept`：**终止性**——此后拒绝新任务，等待排队与运行任务完成；从自身 worker 任务调用时排除调用任务（不自锁）。
+  - `stop() noexcept`：**终止性**——拒绝新任务、丢弃排队任务、等待运行任务（自我排除）后 join；幂等。
+  - `workerCount()`、`stats()`（queued/active/capacity）、`waitIdle(timeout)`；后两者为非纯虚函数，保持未来扩展的源码兼容。
+  - `post` 捕获分配失败并返回 `RejectedQueueFull`；worker 捕获任务异常，异常不穿线程边界。
+  - 在自身任务中销毁执行器（释放最后一个 owner）**不受支持**；在自身任务中调用 `stop()` 受支持。
+- `ServerOptions::executor` 在 **P2b 期间保持默认 `nullptr`**（同步 dispatch，保持既有测试确定性），提供 `makeThreadPoolExecutor` 供宿主/示例显式注入。
+- **P3 切换默认值**为内部线程池；切换的前置条件：请求级取消路由、HTTP pending 不再仅按 `RequestId` 全局关联、执行器拒绝路径产生 JSON-RPC 错误响应。
+
+**后果**：
+- 下游（SSE/订阅/MRTR）可按上述语义设计；不得新增会抛异常的 `IExecutor` 实现。
+- `McpServer::run()` 会 `drain()` 注入的执行器（终止性），宿主共享执行器时需自行管理生命周期。
+- P2b/P3 必须补：注入执行器的集成测试、拒绝响应、取消路由、pending 命名空间。
+
 
 ## 变更流程
 

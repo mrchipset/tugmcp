@@ -840,16 +840,30 @@ class IApprovalHook;
 
 enum class Priority { Normal, High, Emergency };
 struct ExecutorSubmitResult {
-    enum class Status { Accepted, QueueFull, Rejected };
-    Status status = Status::Rejected;
-    std::uint64_t ticket = 0;
+    enum class Kind { Accepted, RejectedQueueFull, RejectedStopped };
+    Kind kind = Kind::Accepted;
+    explicit operator bool() const noexcept;
+};
+struct ExecutorStats {
+    std::size_t queued = 0;
+    std::size_t active = 0;
+    std::size_t capacity = 0; // 0 == unbounded
 };
 class IExecutor {
 public:
     virtual ~IExecutor() = default;
-    // 非阻塞；queue full 同步返回，不抛异常（post 即 try 语义）
-    virtual ExecutorSubmitResult post(Priority, std::function<void()> task) = 0;
-    virtual void shutdown() = 0;
+    // 非阻塞、线程安全、不抛异常（post 即 try 语义）；Emergency 绕过容量上限，
+    // 但 drain/stop 之后仍拒绝。容量只统计排队任务。
+    virtual ExecutorSubmitResult post(std::function<void()> task,
+                                      Priority = Priority::Normal) noexcept = 0;
+    // 终止性：拒绝新任务并等待排队+运行任务完成；从自身 worker 调用时自我排除。
+    virtual void drain() noexcept = 0;
+    // 终止性：拒绝新任务、丢弃排队任务、等待运行任务（自我排除）后 join；幂等。
+    virtual void stop() noexcept = 0;
+    virtual std::size_t workerCount() const noexcept = 0;
+    // 非纯虚：默认实现不报告/不支持，保持扩展源码兼容。
+    virtual ExecutorStats stats() const noexcept { return {}; }
+    virtual bool waitIdle(std::chrono::milliseconds timeout) noexcept;
 };
 
 struct ServerOptions {
@@ -862,7 +876,7 @@ struct ServerOptions {
     std::shared_ptr<IAuthorizer> authorizer;        // 可选
     std::shared_ptr<IAuditHook> audit;              // 可选
     std::shared_ptr<IApprovalHook> approval;        // 可选
-    std::shared_ptr<IExecutor> executor;            // 可选；默认内部线程池
+    std::shared_ptr<IExecutor> executor;            // P2b 默认 nullptr=同步 dispatch；P3 切默认内部线程池（D17）
     std::shared_ptr<ITimeSource> timeSource;        // nullptr = 系统时钟；无条件字段
     bool allowUnvalidatedTools = false;             // 默认 false
     bool enableLegacySse = false;                   // 默认 false
@@ -999,7 +1013,7 @@ public:
 | 项 | 设计 |
 |---|---|
 | IO 线程 | 每 transport 一个 reader + 一个 writer；HTTP server 的 cpp-httplib pool 只做解析/路由 |
-| Executor | handler 在 `IExecutor`；默认固定线程池；可注入单线程/优先级执行器 |
+| Executor | handler 在 `IExecutor`；契约见 D17；P2b 默认 `nullptr`（同步 dispatch），P3 切默认固定线程池；可注入单线程/优先级执行器 |
 | 取消 | `CancellationToken`（C++17 自定义）由 `RequestContext` 持有；handler 周期检查 |
 | pending registry | `RequestId -> {sink, timeout, cancel}`；响应/取消/关闭移除；重连按 era 恢复或取消 |
 | 所有权 | server/client 拥有 transport/executor；回调用 `weak_ptr` 防生命周期悬挂 |
