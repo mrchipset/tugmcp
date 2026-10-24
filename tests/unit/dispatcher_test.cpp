@@ -1,4 +1,4 @@
-﻿#include <cstdint>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -18,6 +18,7 @@ using mcp::v1::Dispatcher;
 using mcp::v1::DispatchConfig;
 using mcp::v1::encode;
 using mcp::v1::ErrorCode;
+using mcp::v1::IProgressSink;
 using mcp::v1::IToolHandler;
 using mcp::v1::Json;
 using mcp::v1::McpError;
@@ -26,25 +27,31 @@ using mcp::v1::MessageKind;
 using mcp::v1::RequestContext;
 using mcp::v1::Result;
 using mcp::v1::ToolDescriptor;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolRegistry;
 using mcp::v1::ToolResult;
 
 namespace {
 
-using CallFn = std::function<Result<ToolResult>(const Json&, RequestContext&)>;
+using CallFn =
+    std::function<Result<ToolOutcome>(const Json&, RequestContext&)>;
 
 class FunctionHandler final : public IToolHandler {
 public:
   explicit FunctionHandler(CallFn fn) : fn_(std::move(fn)) {}
 
-  Result<ToolResult> call(const Json& arguments,
-                          RequestContext& context) override {
+  Result<ToolOutcome> invoke(const Json& arguments, RequestContext& context,
+                             IProgressSink&) override {
     return fn_(arguments, context);
   }
 
 private:
   CallFn fn_;
 };
+
+Dispatcher makeDispatcher(ToolRegistry& registry, DispatchConfig config = {}) {
+  return Dispatcher(registry, nullptr, nullptr, std::move(config));
+}
 
 Message request(std::string method, Json params = nullptr,
                 std::int64_t id = 1) {
@@ -78,18 +85,18 @@ void addTool(ToolRegistry& registry, std::string name, CallFn fn,
               .ok);
 }
 
-ToolResult textResult(std::string text, bool is_error = false) {
+ToolOutcome textResult(std::string text, bool is_error = false) {
   ToolResult result;
   result.isError = is_error;
   result.content.push_back(ContentBlock{"text", std::move(text)});
-  return result;
+  return ToolOutcome(std::move(result));
 }
 
 } // namespace
 
 TEST_CASE("dispatcher handles initialize") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{"test-server", "9.9.9"});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{"test-server", "9.9.9"});
 
   auto response = dispatcher.dispatch(request("initialize"));
   REQUIRE(response.has_value());
@@ -104,7 +111,7 @@ TEST_CASE("dispatcher handles initialize") {
 
 TEST_CASE("dispatcher handles server/discover") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{"discover-server", "1.2.3"});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{"discover-server", "1.2.3"});
 
   auto response = dispatcher.dispatch(request("server/discover"));
   REQUIRE(response.has_value());
@@ -119,7 +126,7 @@ TEST_CASE("dispatcher handles server/discover") {
 
 TEST_CASE("dispatcher handles ping") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
 
   auto response = dispatcher.dispatch(request("ping"));
   REQUIRE(response.has_value());
@@ -129,13 +136,13 @@ TEST_CASE("dispatcher handles ping") {
 TEST_CASE("dispatcher lists tools sorted by name") {
   ToolRegistry registry;
   addTool(registry, "zeta", [](const Json&, RequestContext&) {
-    return Result<ToolResult>(textResult("zeta"));
+    return Result<ToolOutcome>(textResult("zeta"));
   });
   addTool(registry, "alpha", [](const Json&, RequestContext&) {
-    return Result<ToolResult>(textResult("alpha"));
+    return Result<ToolOutcome>(textResult("alpha"));
   }, true);
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(request("tools/list"));
   REQUIRE(response.has_value());
 
@@ -156,13 +163,14 @@ TEST_CASE("dispatcher calls a tool successfully") {
           [&seen_arguments](const Json& arguments, RequestContext& context) {
             seen_arguments = arguments;
             CHECK(context.method == "tools/call");
-            ToolResult result =
-                textResult(arguments.at("text").get<std::string>());
+            ToolResult result;
+            result.content.push_back(ContentBlock{
+                "text", arguments.at("text").get<std::string>()});
             result.structuredContent = Json{{"text", arguments.at("text")}};
-            return Result<ToolResult>(std::move(result));
+            return Result<ToolOutcome>(ToolOutcome(std::move(result)));
           });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(
       request("tools/call", Json{{"name", "echo"},
                                  {"arguments", Json{{"text", "hello"}}}}));
@@ -185,10 +193,10 @@ TEST_CASE("dispatcher defaults missing arguments to an empty object") {
           [&called, &seen](const Json& arguments, RequestContext&) {
             called = true;
             seen = arguments;
-            return Result<ToolResult>(textResult("ok"));
+            return Result<ToolOutcome>(textResult("ok"));
           });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response =
       dispatcher.dispatch(request("tools/call", Json{{"name", "noargs"}}));
   REQUIRE(response.has_value());
@@ -199,7 +207,7 @@ TEST_CASE("dispatcher defaults missing arguments to an empty object") {
 
 TEST_CASE("dispatcher reports unknown methods with MethodNotFound") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
 
   auto response = dispatcher.dispatch(request("unknown/method"));
   REQUIRE(response.has_value());
@@ -211,7 +219,7 @@ TEST_CASE("dispatcher reports unknown methods with MethodNotFound") {
 
 TEST_CASE("dispatcher reports unknown tools with InvalidParams") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
 
   auto response = dispatcher.dispatch(
       request("tools/call", Json{{"name", "missing"}, {"arguments", Json::object()}}));
@@ -225,10 +233,10 @@ TEST_CASE("dispatcher reports unknown tools with InvalidParams") {
 TEST_CASE("dispatcher rejects non-object tool arguments") {
   ToolRegistry registry;
   addTool(registry, "echo", [](const Json&, RequestContext&) {
-    return Result<ToolResult>(textResult("unused"));
+    return Result<ToolOutcome>(textResult("unused"));
   });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(
       request("tools/call",
               Json{{"name", "echo"}, {"arguments", Json::array({1, 2})}}));
@@ -240,7 +248,7 @@ TEST_CASE("dispatcher rejects non-object tool arguments") {
 
 TEST_CASE("dispatcher rejects non-object tools/call params") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
 
   auto response =
       dispatcher.dispatch(request("tools/call", Json::array({1, 2})));
@@ -256,10 +264,10 @@ TEST_CASE("notifications execute without producing a response") {
   addTool(registry, "echo",
           [&calls](const Json&, RequestContext&) {
             ++calls;
-            return Result<ToolResult>(textResult("notified"));
+            return Result<ToolOutcome>(textResult("notified"));
           });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(notification(
       "tools/call",
       Json{{"name", "echo"}, {"arguments", Json::object()}}));
@@ -269,7 +277,7 @@ TEST_CASE("notifications execute without producing a response") {
 
 TEST_CASE("error responses have the required JSON-RPC shape") {
   ToolRegistry registry;
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
 
   auto response = dispatcher.dispatch(request("no/such/method", nullptr, 42));
   REQUIRE(response.has_value());
@@ -288,12 +296,12 @@ TEST_CASE("error responses have the required JSON-RPC shape") {
 TEST_CASE("handler failure is returned as an error response") {
   ToolRegistry registry;
   addTool(registry, "fails", [](const Json&, RequestContext&) {
-    return Result<ToolResult>::failure(
+    return Result<ToolOutcome>::failure(
         McpError::make(ErrorCode::InvalidParams, "handler says no",
                        Json{{"detail", "bad"}}));
   });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(
       request("tools/call", Json{{"name", "fails"}, {"arguments", Json::object()}}));
   REQUIRE(response.has_value());
@@ -306,11 +314,11 @@ TEST_CASE("handler failure is returned as an error response") {
 
 TEST_CASE("handler exceptions are contained as InternalError") {
   ToolRegistry registry;
-  addTool(registry, "throws", [](const Json&, RequestContext&) -> Result<ToolResult> {
+  addTool(registry, "throws", [](const Json&, RequestContext&) -> Result<ToolOutcome> {
     throw std::runtime_error("boom");
   });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(
       request("tools/call", Json{{"name", "throws"}, {"arguments", Json::object()}}));
   REQUIRE(response.has_value());
@@ -322,10 +330,10 @@ TEST_CASE("handler exceptions are contained as InternalError") {
 TEST_CASE("tool isError results stay in the result envelope") {
   ToolRegistry registry;
   addTool(registry, "soft-error", [](const Json&, RequestContext&) {
-    return Result<ToolResult>(textResult("tool failed", true));
+    return Result<ToolOutcome>(textResult("tool failed", true));
   });
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(
       request("tools/call",
               Json{{"name", "soft-error"}, {"arguments", Json::object()}}));
@@ -338,7 +346,7 @@ TEST_CASE("tool isError results stay in the result envelope") {
 TEST_CASE("decoded request can be dispatched end-to-end") {
   ToolRegistry registry;
   addTool(registry, "echo", [](const Json& arguments, RequestContext&) {
-    return Result<ToolResult>(
+    return Result<ToolOutcome>(
         textResult(arguments.at("text").get<std::string>()));
   });
 
@@ -346,7 +354,7 @@ TEST_CASE("decoded request can be dispatched end-to-end") {
       R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo","arguments":{"text":"wire"}}})");
   REQUIRE(decoded.hasValue());
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  auto dispatcher = makeDispatcher(registry, DispatchConfig{});
   auto response = dispatcher.dispatch(decoded.value());
   REQUIRE(response.has_value());
 

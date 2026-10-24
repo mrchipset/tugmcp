@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <doctest/doctest.h>
@@ -9,6 +10,7 @@
 
 using mcp::v1::ContentBlock;
 using mcp::v1::ErrorCode;
+using mcp::v1::IProgressSink;
 using mcp::v1::IToolHandler;
 using mcp::v1::Json;
 using mcp::v1::RequestContext;
@@ -16,6 +18,7 @@ using mcp::v1::Result;
 using mcp::v1::Status;
 using mcp::v1::ToolDescriptor;
 using mcp::v1::ToolHandlerPtr;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolRegistry;
 using mcp::v1::ToolResult;
 
@@ -25,10 +28,11 @@ class NamedHandler final : public IToolHandler {
 public:
   explicit NamedHandler(std::string name) : name_(std::move(name)) {}
 
-  Result<ToolResult> call(const Json&, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json&, RequestContext&,
+                             IProgressSink&) override {
     ToolResult result;
     result.content.push_back(ContentBlock{"text", name_});
-    return result;
+    return ToolOutcome(std::move(result));
   }
 
 private:

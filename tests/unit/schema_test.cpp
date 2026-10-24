@@ -16,6 +16,7 @@ using mcp::v1::Dispatcher;
 using mcp::v1::DispatchConfig;
 using mcp::v1::ErrorCode;
 using mcp::v1::ISchemaValidator;
+using mcp::v1::IProgressSink;
 using mcp::v1::IToolHandler;
 using mcp::v1::Json;
 using mcp::v1::makeNullSchemaValidator;
@@ -30,6 +31,7 @@ using mcp::v1::ServerOptions;
 using mcp::v1::Status;
 using mcp::v1::ToolDescriptor;
 using mcp::v1::ToolRegistry;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolResult;
 using mcp::v1::ValidationIssue;
 using mcp::v1::ValidationReport;
@@ -38,20 +40,20 @@ namespace {
 
 class ConstantHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json&, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json&, RequestContext&, IProgressSink&) override {
     ToolResult result;
     result.content.push_back(ContentBlock{"text", "ok"});
     result.structuredContent = Json{{"value", 42}};
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 
 class PlainHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json&, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json&, RequestContext&, IProgressSink&) override {
     ToolResult result;
     result.content.push_back(ContentBlock{"text", "ok"});
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 
@@ -260,7 +262,7 @@ TEST_CASE("dispatcher reports input validation failure as InvalidParams") {
               .add(descriptor("strict"), std::make_shared<ConstantHandler>())
               .ok);
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  Dispatcher dispatcher(registry, nullptr, nullptr, DispatchConfig{});
   auto response = dispatcher.dispatch(request(
       "tools/call",
       Json{{"name", "strict"}, {"arguments", Json{{"value", "text"}}}}));
@@ -282,7 +284,7 @@ TEST_CASE("output validation failure becomes a tool error") {
   tool.outputSchema = Json{{"type", "object"}};
   REQUIRE(registry.add(tool, std::make_shared<ConstantHandler>()).ok);
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  Dispatcher dispatcher(registry, nullptr, nullptr, DispatchConfig{});
   auto response = dispatcher.dispatch(request(
       "tools/call", Json{{"name", "out"}, {"arguments", Json::object()}}));
   REQUIRE(response.has_value());
@@ -303,7 +305,7 @@ TEST_CASE("declared output schema requires structuredContent") {
   tool.outputSchema = Json{{"type", "object"}};
   REQUIRE(registry.add(tool, std::make_shared<PlainHandler>()).ok);
 
-  Dispatcher dispatcher(registry, DispatchConfig{});
+  Dispatcher dispatcher(registry, nullptr, nullptr, DispatchConfig{});
   auto response = dispatcher.dispatch(request(
       "tools/call", Json{{"name", "plain"}, {"arguments", Json::object()}}));
   REQUIRE(response.has_value());

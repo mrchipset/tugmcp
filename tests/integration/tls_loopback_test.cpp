@@ -1,4 +1,4 @@
-﻿#if TUGMCP_TLS_ENABLED
+#if TUGMCP_TLS_ENABLED
 
 // TLS loopback: real OpenSSL via cpp-httplib, McpClient + McpServer over
 // https://localhost. No sleeps are used.
@@ -35,6 +35,8 @@ using mcp::v1::Status;
 using mcp::v1::StreamableHttpClientOptions;
 using mcp::v1::StreamableHttpServerOptions;
 using mcp::v1::ToolDescriptor;
+using mcp::v1::IProgressSink;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolResult;
 using mcp::v1::makeStreamableHttpClientTransport;
 using mcp::v1::makeStreamableHttpServerTransport;
@@ -97,14 +99,14 @@ private:
 
 class EchoHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json& arguments, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json& arguments, RequestContext&, IProgressSink&) override {
     ToolResult result;
     ContentBlock block;
     block.type = "text";
     block.text = arguments.value("text", std::string{});
     result.content.push_back(block);
     result.structuredContent = Json{{"text", block.text}};
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 

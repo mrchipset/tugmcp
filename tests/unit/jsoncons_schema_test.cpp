@@ -25,6 +25,8 @@ using mcp::v1::ServerOptions;
 using mcp::v1::Status;
 using mcp::v1::ToolDescriptor;
 using mcp::v1::ToolRegistry;
+using mcp::v1::IProgressSink;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolResult;
 using mcp::v1::ITransport;
 using mcp::v1::McpError;
@@ -41,11 +43,11 @@ Json textObjectSchema() {
 
 class TextHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json& arguments, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json& arguments, RequestContext&, IProgressSink&) override {
     ToolResult result;
     result.content.push_back(
         ContentBlock{"text", arguments.value("text", std::string{})});
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 

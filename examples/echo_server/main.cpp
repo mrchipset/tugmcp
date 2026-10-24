@@ -12,8 +12,8 @@ using namespace mcp::v1;
 
 class EchoHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json& arguments,
-                          RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json& arguments, RequestContext&,
+                             IProgressSink&) override {
     std::string text;
     if (arguments.contains("text") && arguments.at("text").is_string()) {
       text = arguments.at("text").get<std::string>();
@@ -22,7 +22,7 @@ public:
     ToolResult result;
     result.content.push_back(ContentBlock{"text", text});
     result.structuredContent = Json{{"text", text}};
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 

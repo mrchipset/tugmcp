@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <tugmcp/error.hpp>
+#include <tugmcp/operation.hpp>
 #include <tugmcp/request_context.hpp>
 #include <tugmcp/schema.hpp>
 
@@ -20,9 +22,15 @@ namespace v1 {
 
 using Json = nlohmann::json;
 
+// MCP content block. `type` stays first and `text` second so existing
+// aggregate initialization such as ContentBlock{"text", "hello"} is unchanged.
 struct ContentBlock {
   std::string type = "text";
   std::string text;
+  std::string mimeType;
+  std::string dataBase64;
+  std::string uri;
+  Json annotations;
 };
 
 // Tool names must not contain '#': the registry derives the output-schema id
@@ -40,15 +48,21 @@ struct ToolDescriptor {
 
 struct ToolResult {
   bool isError = false;
+  ResultType resultType = ResultType::Complete;
   std::vector<ContentBlock> content;
   Json structuredContent;
+  std::uint32_t ttlMs = 0;
+  std::string cacheScope;
 };
+
+using ToolOutcome = OperationOutcome<ToolResult>;
 
 class IToolHandler {
 public:
   virtual ~IToolHandler() = default;
-  virtual Result<ToolResult> call(const Json& arguments,
-                                  RequestContext& context) = 0;
+  virtual Result<ToolOutcome> invoke(const Json& arguments,
+                                     RequestContext& context,
+                                     IProgressSink& progress) = 0;
 };
 
 using ToolHandlerPtr = std::shared_ptr<IToolHandler>;

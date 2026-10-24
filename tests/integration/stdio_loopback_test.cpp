@@ -1,4 +1,4 @@
-﻿// End-to-end test: a real McpServer over StdioTransport connected to the test
+// End-to-end test: a real McpServer over StdioTransport connected to the test
 // through anonymous pipes. No sleeps are used; the server exits on pipe EOF.
 
 #include <doctest/doctest.h>
@@ -39,6 +39,8 @@ ServerOptions permissiveServerOptions() {
 } // namespace
 
 using mcp::v1::ToolHandlerPtr;
+using mcp::v1::IProgressSink;
+using mcp::v1::ToolOutcome;
 using mcp::v1::ToolResult;
 using mcp::v1::decode;
 using mcp::v1::makeStdioTransport;
@@ -57,14 +59,14 @@ std::FILE* openWrite(int fd) { return ::fdopen(fd, "wb"); }
 
 class EchoHandler final : public IToolHandler {
 public:
-  Result<ToolResult> call(const Json& arguments, RequestContext&) override {
+  Result<ToolOutcome> invoke(const Json& arguments, RequestContext&, IProgressSink&) override {
     ToolResult result;
     ContentBlock block;
     block.type = "text";
     block.text = arguments.value("text", std::string{});
     result.content.push_back(block);
     result.structuredContent = Json{{"text", block.text}};
-    return result;
+    return ToolOutcome(std::move(result));
   }
 };
 

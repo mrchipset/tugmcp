@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <string>
 
 #include "message.hpp"
@@ -24,12 +26,17 @@ private:
   std::atomic<bool> cancelled_{false};
 };
 
-// Per-request state handed to handlers. The token pointer is non-owning and is
-// only valid for the duration of the call.
+// Per-request state handed to handlers. The dispatcher owns the cancellation
+// token for the request lifetime; future cancellation routing will share this
+// token with the pending-request registry. inputResponses and requestState are
+// the verbatim MRTR fields supplied by the client (both absent for a normal
+// request).
 struct RequestContext {
   RequestId id;
   std::string method;
-  CancellationToken* cancellation = nullptr;
+  std::shared_ptr<CancellationToken> cancellation;
+  Json inputResponses;
+  std::optional<std::string> requestState;
 };
 
 } // namespace v1

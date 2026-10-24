@@ -1,13 +1,24 @@
 #pragma once
 
 #include <functional>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include "error.hpp"
 #include "message.hpp"
 
 namespace mcp {
 namespace v1 {
+
+// Transport-supplied metadata for an inbound message. An empty
+// protocolVersion means the transport did not observe an explicit version (for
+// example stdio or a legacy client).
+struct MessageMetadata {
+  std::string protocolVersion;
+};
+
+using MessageHandlerEx = std::function<void(Json, const MessageMetadata&)>;
 
 // Byte/message transport contract. A transport only moves JSON-RPC envelopes;
 // it does not know MCP method semantics. Handlers are set before start() and
@@ -35,6 +46,15 @@ public:
 
   // Receive callback. Set before start().
   virtual void setOnMessage(std::function<void(Json)> handler) = 0;
+
+  // Metadata-aware receive callback. Transports that can observe per-message
+  // protocol information override this; by default it adapts to setOnMessage
+  // and reports no metadata.
+  virtual void setOnMessageEx(MessageHandlerEx handler) {
+    setOnMessage([handler = std::move(handler)](Json message) mutable {
+      handler(std::move(message), MessageMetadata{});
+    });
+  }
 
   // Transport/framing error callback (not protocol dispatch errors).
   virtual void setOnError(std::function<void(McpError)> handler) = 0;

@@ -236,8 +236,9 @@ include/tugmcp/
   server.hpp             // McpServer/ServerOptions/IToolHandler/...
   client.hpp             // McpClient/ClientOptions/CallOptions
   tool.hpp               // ToolDescriptor/ToolResult/ToolRegistry
-  resource.hpp           // ResourceDescriptor/ResourceContent
-  prompt.hpp             // PromptDescriptor/PromptResult
+  operation.hpp          // ResultType/OperationOutcome/Page/ListParams/Progress/IProgressSink
+  resource.hpp           // ResourceDescriptor/ResourceContent/ResourceTemplate/IResourceProvider
+  prompt.hpp             // PromptDescriptor/PromptResult/IPromptProvider
   schema_validator.hpp   // ISchemaValidator + Null/Jsoncons/Valijson
   authenticator.hpp      // IAuthenticator/IAuthorizer/IAuditHook/IApprovalHook
   canonical_json.hpp     // JCS/stable subset + tool_schema_hash
@@ -821,7 +822,7 @@ public:
 - **分页**：`listTools/listResources/listResourceTemplates/listPrompts` 支持 `cursor`；cursor 是不透明字符串，服务端注册表生成；库不解释业务。
 - **缓存**：2026 list/read 结果带 `ttlMs`/`cacheScope`；2025 不伪造这些字段。
 - **MRTR**：handler 返回 `OperationOutcome<T>` 的 `InputRequired`（`inputRequests`/`requestState` 至少一个）；adapter 输出 `resultType=input_required`。**重试是客户端发起的新请求**：客户端选择新的 JSON-RPC id，原样回传 `requestState`，并带 `inputResponses`；服务端不得指定新 id。适用于 `tools/call`、`resources/read`、`prompts/get`（`ToolOutcome`/`ResourceOutcome`/`PromptOutcome`）。
-- **MRTR 校验**：adapter 校验 `requestState` 完整性/轮次/过期；缺失 `inputResponses` 或状态被篡改 → `-32602`/tool error；多轮按 `requestState` 继续。
+- **MRTR 校验**：adapter 校验 `requestState` 完整性/轮次/过期；缺失 `inputResponses` 或状态被篡改 → `-32602`/tool error；多轮按 `requestState` 继续。**P2b 实现边界**：库只做结构性校验（`requestState` 与 `inputResponses` 成对、类型正确、原样回传）；`requestState` 的完整性/签名/轮次由应用自行编码与校验（D10 安全边界）。
 - **订阅**：客户端用 `SubscriptionFilter`（list_changed + `resourceSubscriptions`）；2026 `subscriptions/listen` 先回 `notifications/subscriptions/acknowledged`（带 `subscriptionId`），再做过滤协商；不支持的类型省略或拒绝，不接受任意事件类型。2025 用对应资源订阅/通知。
 - **服务端推送 hooks**：`notifyResourceUpdated(uri)`/`notifyListChanged(kind)` 只向已订阅者投递；`SseSink::send(..., eventId)` 用于 2025 per-stream replay；2026 显式关闭，不依赖 Last-Event-ID。
 - **2025 server→client 请求**：adapter 通过 `ClientEventSink::onRequest(request, responder)` 交给客户端；`setRequestHandler("roots/list"/"sampling/createMessage"/"elicitation/create")`；按 `ClientCapabilities` gate；未注册返回 method-not-found。2026 不发起该路径，改用 MRTR `input_required`。
@@ -877,6 +878,8 @@ struct ServerOptions {
     std::shared_ptr<IAuditHook> audit;              // 可选
     std::shared_ptr<IApprovalHook> approval;        // 可选
     std::shared_ptr<IExecutor> executor;            // P2b 默认 nullptr=同步 dispatch；P3 切默认内部线程池（D17）
+    std::shared_ptr<IResourceProvider> resources;   // 可选；P2b 每类最多一个 provider（见 §14 说明）
+    std::shared_ptr<IPromptProvider> prompts;       // 可选
     std::shared_ptr<ITimeSource> timeSource;        // nullptr = 系统时钟；无条件字段
     bool allowUnvalidatedTools = false;             // 默认 false
     bool enableLegacySse = false;                   // 默认 false
@@ -919,10 +922,9 @@ public:
     explicit McpServer(ServerOptions);
     Status addTool(std::shared_ptr<IToolHandler>);
     Status removeTool(std::string_view name);
-    Status addResource(std::shared_ptr<IResourceProvider>);
-    Status removeResource(std::string_view uri);
-    Status addPrompt(std::shared_ptr<IPromptProvider>);
-    Status removePrompt(std::string_view name);
+    // 资源/提示词在 P2b 由 ServerOptions 注入（每类一个 provider）：
+    // provider 自身负责分页与 URI 所有权，避免多 provider 的 URI 归属歧义。
+    // 动态 add/remove provider 留到 M5。
     void notifyResourceUpdated(std::string_view uri);
     void notifyListChanged(ListKind kind); // tools/prompts/resources
     Status run(std::shared_ptr<ITransport>); // 阻塞或后台，由 runAsync 区分

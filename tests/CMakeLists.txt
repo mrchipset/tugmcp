@@ -19,7 +19,8 @@ add_executable(tugmcp_unit_tests
   unit/client_test.cpp
   unit/canonical_test.cpp
   unit/executor_test.cpp
-  unit/schema_test.cpp)
+  unit/schema_test.cpp
+  unit/protocol_surface_test.cpp)
 target_link_libraries(tugmcp_unit_tests PRIVATE tugmcp::core tugmcp::tests)
 target_compile_definitions(tugmcp_unit_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

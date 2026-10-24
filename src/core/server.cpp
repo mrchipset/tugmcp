@@ -33,8 +33,12 @@ Status McpServer::run() {
         ErrorCode::InternalError, "transport must not be null"));
   }
 
-  Dispatcher dispatcher(
-      tools_, DispatchConfig{options_.name, options_.version});
+  DispatchConfig config;
+  config.serverName = options_.name;
+  config.serverVersion = options_.version;
+  config.instructions = options_.instructions;
+  Dispatcher dispatcher(tools_, options_.resources.get(),
+                        options_.prompts.get(), std::move(config));
 
   auto record_error = [this](McpError error) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -42,15 +46,34 @@ Status McpServer::run() {
   };
 
   auto clear_callbacks = [this] {
+    transport_->setOnMessageEx(nullptr);
     transport_->setOnMessage(nullptr);
     transport_->setOnError(nullptr);
     transport_->setOnClose(nullptr);
   };
 
+  auto notify = [this, record_error](Json message) {
+    try {
+      const std::string encoded = message.dump();
+      Status sent = transport_->sendRaw(encoded);
+      if (!sent) {
+        record_error(sent.error);
+      }
+    } catch (const std::exception& error) {
+      record_error(McpError::make(
+          ErrorCode::InternalError,
+          std::string("failed to encode notification: ") + error.what()));
+    } catch (...) {
+      record_error(McpError::make(ErrorCode::InternalError,
+                                  "failed to encode notification"));
+    }
+  };
+
   const std::shared_ptr<IExecutor> executor = options_.executor;
 
-  transport_->setOnMessage(
-      [this, &dispatcher, record_error, executor](Json incoming) {
+  transport_->setOnMessageEx(
+      [this, &dispatcher, record_error, executor,
+       notify](Json incoming, const MessageMetadata& metadata) {
         Message message;
         try {
           auto decoded = decode(incoming);
@@ -74,10 +97,12 @@ Status McpServer::run() {
         }
 
         auto dispatch_and_send =
-            [this, &dispatcher, record_error,
-             message = std::move(message)]() mutable {
+            [this, &dispatcher, record_error, notify,
+             message = std::move(message),
+             protocol_version = metadata.protocolVersion]() mutable {
               try {
-                auto response = dispatcher.dispatch(message);
+                auto response =
+                    dispatcher.dispatch(message, protocol_version, notify);
                 if (!response.has_value()) {
                   return;
                 }

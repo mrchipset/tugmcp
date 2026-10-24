@@ -7,6 +7,8 @@
 #include <string>
 
 #include <tugmcp/executor.hpp>
+#include <tugmcp/prompt.hpp>
+#include <tugmcp/resource.hpp>
 #include <tugmcp/schema.hpp>
 #include <tugmcp/time_source.hpp>
 #include <tugmcp/tool.hpp>
@@ -18,7 +20,13 @@ namespace v1 {
 struct ServerOptions {
   std::string name = "tugmcp";
   std::string version = "0.1.0";
+  std::string instructions;
   std::shared_ptr<ITimeSource> timeSource;
+
+  // Optional resource and prompt providers. At most one provider per kind is
+  // supported in this phase; each provider owns its namespace and pagination.
+  std::shared_ptr<IResourceProvider> resources;
+  std::shared_ptr<IPromptProvider> prompts;
 
   // Schema validation policy. With no validator and a tool that declares an
   // inputSchema, registration fails unless allowUnvalidatedTools is true.

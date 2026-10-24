@@ -3,6 +3,9 @@
 #include <tugmcp/canonical.hpp>
 #include <tugmcp/client.hpp>
 #include <tugmcp/core.hpp>
+#include <tugmcp/operation.hpp>
+#include <tugmcp/prompt.hpp>
+#include <tugmcp/resource.hpp>
 #include <tugmcp/request_context.hpp>
 #include <tugmcp/schema.hpp>
 #include <tugmcp/server.hpp>

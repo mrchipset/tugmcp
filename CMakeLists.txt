@@ -52,6 +52,7 @@ add_library(tugmcp_core STATIC
   src/core/message.cpp
   src/core/codec.cpp
   src/core/canonical.cpp
+  src/core/operation.cpp
   src/core/registry.cpp
   src/core/dispatcher.cpp
   src/core/server.cpp
