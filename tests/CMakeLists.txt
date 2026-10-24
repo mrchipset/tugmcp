@@ -55,7 +55,11 @@ target_link_libraries(tugmcp_integration_tests PRIVATE tugmcp::core tugmcp::test
 target_compile_definitions(tugmcp_integration_tests PRIVATE
   TUGMCP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 if(TUGMCP_TLS)
-  target_compile_definitions(tugmcp_integration_tests PRIVATE TUGMCP_TLS_ENABLED=1)
+  target_compile_definitions(tugmcp_integration_tests PRIVATE
+    TUGMCP_TLS_ENABLED=1
+    CPPHTTPLIB_OPENSSL_SUPPORT)
+  target_link_libraries(tugmcp_integration_tests PRIVATE
+    OpenSSL::SSL OpenSSL::Crypto)
 else()
   target_compile_definitions(tugmcp_integration_tests PRIVATE TUGMCP_TLS_ENABLED=0)
 endif()

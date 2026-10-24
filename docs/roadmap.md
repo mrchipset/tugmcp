@@ -49,7 +49,7 @@
 |---|---|---|
 | 静态库（默认产物） | 已完成 | `tugmcp::core` 为 STATIC |
 | header-only 消费 | 未开始 | `TUGMCP_HEADER_ONLY=ON` → `FATAL_ERROR` |
-| OpenSSL 可选编译 | 部分（WIP） | `TUGMCP_TLS=ON` 可构建、监听与证书校验已接线；客户端 https 构造仍失败（2 个 TLS 用例红） |
+| OpenSSL 可选编译 | 已完成 | `TUGMCP_TLS=ON`（OpenSSL ≥3.0）可构建并 loopback 通过；`TLS=OFF` 时 `https://` → `unsupported_scheme`。限制：server 侧无握手错误回调、SNI 由 URL host 决定 |
 | `3rd/` vendoring | 部分 | nlohmann/json 3.12.0、doctest 2.5.3、cpp-httplib 0.63.0（单头哈希）；jsoncons 1.10.0、Valijson 1.1.3（逐文件 `MANIFEST.sha256`，177+49 文件） |
 | `TUGMCP_USE_SYSTEM_DEPS` | 未开始 | → `FATAL_ERROR` |
 | conformance 套件 | 未开始 | `TUGMCP_CONFORMANCE` → `FATAL_ERROR` |
@@ -61,7 +61,7 @@
 - **公共头（17）**：`core` / `version` / `error` / `message` / `transport` / `transport/stdio` / `transport/http` / `request_context` / `time_source` / `tool` / `server` / `client` / `schema` / `canonical` / `schema/{null,jsoncons,valijson}`（另有实现专用 `detail/http_httplib.hpp`）
 - **源码（14）**：`src/core/{version,error,message,codec,canonical,registry,dispatcher,client}.cpp`、`src/core/dispatcher.hpp`、`src/transport/{stdio,http_server,http_client}.cpp`、`src/schema/{jsoncons,valijson}_validator.cpp`
 - **测试**：11 个 unit 文件、4 个 integration 文件、双 TU ODR、`tests/helpers/fake_transport.hpp`
-- **ctest**：`146/146` 通过（unit 128 + integration 18）
+- **ctest**：默认 `TLS=OFF` **150/150**；`TLS=ON` **151/151**（含 2 个 TLS loopback 用例）
 - **构建**：MSVC `/W4 /permissive- /utf-8` 无告警；configure 阶段校验单头 SHA256 + jsoncons/Valijson 逐文件清单（177+49）
 
 | commit | 内容 |
@@ -81,7 +81,7 @@
 5. **已知技术债**（Gate 3）：一次 `call` 约 12 次解析/序列化；`McpServer` 实现寄居 `dispatcher.cpp`；ODR 仅覆盖 3/9 公共头；`FakeTransport::emitClose` 未遵守「close 后不回调」；`core.hpp` umbrella 未收录新头。
 6. **P2-B 技术债（已完成）**：`decode(const Json&)`、`ITransport::sendRaw`、`src/core/server.cpp` 拆分、ODR 覆盖全部公共头、`FakeTransport` close 后不再回调。
 7. **HTTP stateless 约束**：pending 按 `RequestId` 关联，**并发客户端 id 必须全局唯一**（冲突 → 409）；工具在 HTTP 线程同步执行，**无执行超时**；`admission`/并发流限制字段已标注未接线。
-8. **TLS（WIP，未完成）**：`TUGMCP_TLS=ON` 已接线（OpenSSL 3.0、宏/链接、SSLServer/SSLClient、工厂校验、自签 fixtures），但客户端 https 构造在 cpp-httplib 抛 `'https' scheme is not supported`，TLS=ON 的 2 个集成用例仍失败；默认 `TLS=OFF` 构建 150/150 全绿。`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`。
+8. **TLS（已完成）**：`TUGMCP_TLS=ON` 已接线并通过 loopback（OpenSSL 3.0、宏/链接、SSLServer/SSLClient、工厂校验、自签 fixtures）。限制：cpp-httplib 无 server 侧握手错误回调；`serverName` 由 URL host 决定（无独立 SNI 设置）。`McpClient::connect()` 的 `protocolVersion` 参数仍硬编码 `2025-11-25`。
 9. **P2–P4 未开始**：M2 协议面（SSE/MRTR/subscriptions/resources/prompts/admission）、M3/M4（2025 session/replay）、M5/M6（executor/hooks/legacy）、conformance。
 
 ## 6. 下一步优先级

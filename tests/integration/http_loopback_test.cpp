@@ -1,9 +1,9 @@
-// Streamable HTTP loopback: McpClient + McpServer over real localhost sockets,
+﻿// Streamable HTTP loopback: McpClient + McpServer over real localhost sockets,
 // plus raw HTTP checks for the protocol surface.
 
 #include <doctest/doctest.h>
 
-#include <httplib.h>
+#include "tugmcp/detail/http_httplib.hpp"
 
 #include <tugmcp/client.hpp>
 #include <tugmcp/server.hpp>
