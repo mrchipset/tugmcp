@@ -326,7 +326,7 @@ endif()
 | 错误模型 | `-32700/-32600/-32601/-32602/-32603` 映射；`-32020/-32022` 协议 header/version；`-32021` 缺客户端能力；本地错误 5 个 reason 与发生时点；认证失败走 HTTP 401 而非 `-32021` | `tugmcp_unit_tests` | §7.2；D10；D14；§19 Security |
 | 生命周期 | 2026 stateless；2025 `initialize`/`initialized`/session；header 与 `_meta` 不一致的拒绝路径；不支持版本 → `-32022` | `tugmcp_integration_tests` | §13；§10；D12；§22.1 M2/M3 |
 | MRTR | tools/resources/prompts 三类操作均支持多轮 `input_required`；客户端新 id；`requestState` 原样回传；篡改 state 拒绝；缺 `inputResponses` 拒绝；超时 | `tugmcp_integration_tests` | §13.4；§19 MRTR；D12 |
-| 订阅 | ack/filter；`subscriptionId` 与请求 id 关联；2025 replay；2026 re-subscribe；慢消费者不阻塞写路径 | `tugmcp_integration_tests` | §13；§19 Subscriptions；§16 |
+| 订阅 | ack/filter；`params._meta["io.modelcontextprotocol/subscriptionId"]` 与 listen 请求 id 关联；2025 replay；2026 re-subscribe；慢消费者不阻塞写路径 | `tugmcp_integration_tests` | §13；§19 Subscriptions；§16；D18 |
 | 取消/进度 | `CancelMode` 三态（`Auto`/`CloseStream`/`Notification`）；超时同时取消 pending 与 handler；progress 仅在带 token 时发送 | `tugmcp_integration_tests` | §7.1；§19 Async；§16 |
 | 背压/关闭 | 队列满返回 `QueueFull`；断连清理；shutdown 严格遵循主设计 §16（关闭顺序：停新请求→取消/等待→关流→关 transport→drain→join），本文不另立版本 | `tugmcp_integration_tests` | §8；§16；§19 Backpressure |
 | TLS reason 矩阵 | 按 §6.2 的 `reason × 构建状态 × 角色/观测点` 逐行断言；TLS-off 的创建期失败用 `CountingListener` 断言 accept 次数 = 0；TLS-on 握手/证书/mTLS | `tugmcp_tls_tests` | D14；§18.1；§19 Security |
@@ -497,23 +497,26 @@ ctest --test-dir build-tsan --output-on-failure -R "executor|integration"
 ### 8.4 Conformance
 
 - 仅在 `TUGMCP_CONFORMANCE=ON` 时注册 `conformance.external`；默认 OFF，不把外部套件强加给普通构建。
-- 依赖 `tugmcp_echo_server` target（`examples/echo_server/`，由 `TUGMCP_BUILD_EXAMPLES` 构建）；`if(NOT TARGET tugmcp_echo_server)` 直接 `FATAL_ERROR`。
-- `TUGMCP_CONFORMANCE=ON` 但找不到 Python3 Interpreter → `FATAL_ERROR`，不得静默降级为“只跑本地 vectors”。
-- `tests/conformance/run_external.py` 是外部 runner 的唯一入口：启动 `tugmcp` echo server（stdio 与 loopback HTTP 各一次）→ 运行固定版本套件 → 断言退出码 0 且 `tests/conformance/expected_cases.json` 清单齐全。用例缺失、跳过或版本不符都按失败处理。
-- 参数固定：`--transport stdio --transport http --package @modelcontextprotocol/conformance@0.2.0-alpha.12`。
-- 固定 `@modelcontextprotocol/conformance@0.2.0-alpha.12`；旧版 `0.1.16` 早于 2026，不作为 2026 gate（D12）。
-- 「2026 覆盖探测」= 首次运行把结果写入 `${CMAKE_CURRENT_BINARY_DIR}/coverage_2026.json`（源码树只保留 `expected_cases.json`，避免测试弄脏工作区/并行 job 冲突），未覆盖用例在本节显式列出并链接设计条目。
-- `ctest -L conformance` **必须调用 `run_external.py`**，不能只跑本地 vectors；本地 `tugmcp_conformance_tests` 只是补充，不替代外部套件。
+- 官方套件 `@modelcontextprotocol/conformance@0.2.0-alpha.12` 的 `server` 子命令**只支持 `--url`（HTTP/SSE），不支持 stdio command**。stdio 外部验证用 MCP Inspector CLI（`--cli`），不冒充 conformance 计分。
+- 依赖测试侧 fixture server `tugmcp_conformance_server`（`tests/conformance/`，HTTP，仅测试资产），实现官方场景期望的 diagnostic tools/resources/prompts；**不得用生产 `echo_server` 充数**。
+- `tests/conformance/run_external.py` 是外部 runner 的唯一入口：启动 fixture server（`127.0.0.1:0`）→ 运行
+  `server --url http://127.0.0.1:<port>/mcp --requirements 2026-07-28`，再跑 `2025-11-25` → 断言**必需场景真实失败为 0**；extension/pending 用 `tests/conformance/expected_failures.yaml` 显式登记。
+- 固定 `@modelcontextprotocol/conformance@0.2.0-alpha.12`；缺 Node/npx/Python3 → `FATAL_ERROR`，不得静默降级为“只跑本地 vectors”。
+- 结果写 `${CMAKE_CURRENT_BINARY_DIR}/conformance/<revision>/`（源码树只保留 `expected_failures.yaml`）；`ctest -L conformance` 必须调用 `run_external.py`。
+- `expected_failures.yaml` 中登记的用例一旦重新通过，runner 必须**失败**（防止静默接受回归）；未登记失败一律失败。
+- fixture server 启动后必须在 stderr 打印实际 bound port；runner 等到端口可连接后再跑套件（不得固定 sleep）。
+- Node/npx 版本固定（Inspector 2.12 需要 Node ≥22.19；conformance 0.2.0-alpha.12）；离线或包不可得 → `FATAL_ERROR`，不得跳过。
+- 本地 `tugmcp_conformance_tests` 只是补充，不替代外部套件。
 - 示例调用（草图，未编译）：
 
 ```bash
-# 草图，未编译：外部 runner 调用方式
+# 草图：HTTP-only 官方 server 模式；stdio 用 Inspector 另行冒烟
 python tests/conformance/run_external.py \
-  --echo-server build/examples/echo_server/tugmcp_echo_server \
-  --transport stdio --transport http \
+  --fixture-server build/tests/tugmcp_conformance_server \
+  --revision 2026-07-28 \
   --package @modelcontextprotocol/conformance@0.2.0-alpha.12 \
-  --expected-cases tests/conformance/expected_cases.json \
-  --coverage-out build/coverage_2026.json
+  --expected-failures tests/conformance/expected_failures.yaml \
+  --out build/conformance/2026-07-28
 ```
 
 ### 8.5 覆盖矩阵与 CI 构建矩阵

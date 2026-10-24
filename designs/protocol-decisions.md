@@ -248,6 +248,37 @@
 - P2b/P3 必须补：注入执行器的集成测试、拒绝响应、取消路由、pending 命名空间。
 
 
+## D18 — 2026-07-28 stateless wire 对齐官方 conformance
+
+**背景**：2026-10-24 首次用 `@modelcontextprotocol/conformance@0.2.0-alpha.12` 跑 `--requirements 2026-07-28`（HTTP echo server，79 passed / 88 failed）与 MCP Inspector 2.12。Inspector 全绿；conformance 暴露出 `_meta` 键名、移除方法状态码、错误 id、版本错误结构、订阅通知元数据等真实偏差。此前设计中的 `_meta.protocolVersion` 与 `params.subscriptionId` 是错误假设。证据见 `docs/conformance-report.md`。
+
+**决策**：
+1. **2026 请求 `_meta`（权威键名）**：`params._meta` 必须为对象，且必须含
+   - `io.modelcontextprotocol/protocolVersion`（string，必须与 HTTP `MCP-Protocol-Version` 一致）
+   - `io.modelcontextprotocol/clientCapabilities`（object；空对象表示不支持可选能力）
+   `io.modelcontextprotocol/clientInfo` 为 SHOULD（服务端不得强制）；`progressToken` 仍是普通键；日志级别为 `io.modelcontextprotocol/logLevel`。缺失/类型错 → `-32602` + HTTP 400。校验覆盖所有 client→server 带 `params` 的消息；**通知**（无 id）违规时返回 HTTP 400、空 body（无法回 JSON-RPC error）。
+2. **校验顺序（固定）**：Host/Origin → Content-Type/body 上限 → 版本解析/支持（`-32022`）→ `_meta` 形状（`-32602`）→ header↔`_meta` 一致性（`-32020`）→ `Mcp-Method`/`Mcp-Name`（`-32020`）→ 方法存在性（`-32601`）。`_meta.protocolVersion` 与 header 不一致归 `-32020`。
+3. **HTTP 状态映射（按 era）**：2026 下 `-32602`/`-32020`/`-32021`/`-32022` → 400，`-32601` → 404；2025 保持既有 200（未知方法仍 200 + `-32601`）。所有错误必须回显请求 id（解析成功时不得 `id:null`）；2025 已删除 session 的 404 继续无 JSON-RPC body。
+4. **2026 移除的方法**：`initialize`、`ping`、`logging/setLevel`、`resources/subscribe`、`resources/unsubscribe` 以及未知方法，一律 HTTP 404 + `-32601`。`server/discover` 保留。
+5. **不支持版本**：`-32022` + `error.data.requested`（原样回显 header 字符串）+ `error.data.supported`（支持版本数组）；HTTP 400。数组来源：`StreamableHttpServerOptions::supportedVersions`（由 `McpServer` 在 `start()` 前从 `ServerOptions` 推送），transport 不依赖 `ServerOptions`。
+6. **clientCapabilities**：`RequestContext` 增加 `Json clientCapabilities`（从 `_meta` 原样取出）与 `std::optional<RequestId> subscriptionId`（订阅流上下文）。`-32021` 由 handler/authorizer 在需要未声明能力时返回，`error.data.requiredCapabilities` 必须是 ClientCapabilities 对象（如 `{"sampling":{}}`），不是数组。
+7. **结果元数据**：2026 结果 `result._meta["io.modelcontextprotocol/serverInfo"]` 为 SHOULD（保留顶层 `serverInfo` 以兼容旧客户端）。
+8. **订阅 wire**：
+   - 请求 filter：`params.notifications`，布尔字段 `toolsListChanged`/`promptsListChanged`/`resourcesListChanged`（可扩展），不再使用 `params.subscriptions.{listChanged,resources}`。2026 下 `SubscriptionFilter.resources` 非空 → `-32602`（per-URI 订阅在 2026 未定义）。
+   - 首帧必须是 `notifications/subscriptions/acknowledged`，params 含 `_meta["io.modelcontextprotocol/subscriptionId"]`（值 = `subscriptions/listen` 的 JSON-RPC id，**JSON 类型原样**，不得字符串化）与 `notifications`（布尔对象，镜像服务端接受的子集）。
+   - 所有该流通知的 `params._meta["io.modelcontextprotocol/subscriptionId"]` 必须与该 id **JSON 类型和值都一致**；不再使用顶层 `subscriptionId`/`requestId`。C++ `SubscriptionId` 仍是 string，仅用于应用侧簿记。
+9. **completion**：实现 `completion/complete`；**无条件声明** `completions` capability；`ICompletionProvider` 返回内层 `completion` 对象（`{"values":[...],"hasMore"?:bool,"total"?:int}`），provider 为 null 时返回 `{"values":[]}`；结果走 2026 `completeResult()`（带 `resultType`）；`ref`/`argument` 结构错误 → `-32602`。
+10. **Host/Origin**：在 body 解析前校验 POST/GET/DELETE。Host 大小写不敏感、去端口后必须属于 `127.0.0.1`/`localhost`/`[::1]`（或 `allowedHosts`）；`Origin` 缺失允许，存在则必须是 loopback（或 `allowedOrigins`）；`Origin: null` 视为不允许。非法 → HTTP 403。代理场景可显式配置 `allowedHosts={"*"}`/`allowedOrigins={"*"}`；stdio 不适用。
+11. **list_changed**：自动 `addTool/removeTool` 通知属 SHOULD，**延后到 P4**（需要 registry 变更 sink 与锁语义）；C2 先不实现，conformance 该项为 warning。
+
+**后果**：
+- 2025 路径（initialize/session/GET/replay）不受影响；2026 client 必须注入 namespaced `_meta`。
+- `designs/testing.md` conformance runner 需按“官方 server 模式只支持 URL”的现实修订；stdio 外部验证用 Inspector。
+- 现有 `docs/roadmap.md` §5 的 `_meta`/订阅偏差记录需在 C3 后更新。
+- 真实失败清零前不得进入 P4。
+
+**替代方案（拒绝）**：保留顶层 `subscriptionId`（与官方 schema 不兼容）；对移除方法返回 200 + `-32601`（conformance 要求 404）；只在 `_meta` 使用非 namespaced 键（官方 schema 不识别）。
+
 ## 变更流程
 
 1. 提 ADR 变更：写清背景、替代方案、影响（API/wire/ABI/测试）。

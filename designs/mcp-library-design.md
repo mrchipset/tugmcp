@@ -131,7 +131,7 @@
 | Last-Event-ID | per-stream 可选 | 无 | 2025 保存有界 replay；2026 重新订阅 |
 | `resultType` | 无 | 有 | 2026 result builder 必填 |
 | cache | 无 `ttlMs/cacheScope` | 有 | 2026 list/read 结果带 |
-| 订阅 | `resources/subscribe` 等 | `subscriptions/listen` + `resourceSubscriptions` | 2026 adapter；2025 兼容 |
+| 订阅 | `resources/subscribe` 等 | `subscriptions/listen` + `params.notifications` 布尔 filter（D18） | 2026 adapter；2025 兼容 |
 | MRTR | 无 | `input_required`/`requestState` | 2026 adapter |
 | JSON-RPC batch | 2025-06-18 起移除 | 不允许 | 两种都拒绝 batch |
 | HTTP+SSE 旧传输 | 兼容 | deprecated | 仅 legacy adapter |
@@ -321,10 +321,10 @@ struct Progress {
 };
 enum class CancelMode { Auto, CloseStream, Notification };
 
-using SubscriptionId = std::string;  // 服务端生成的不透明 id（"s1"…）
+using SubscriptionId = std::string;  // 2026 listen 请求的 JSON-RPC id 的字符串形式（D18）
 struct SubscriptionFilter {
     std::vector<ListKind> listChanged;      // 空 = 不订阅 list_changed
-    std::vector<std::string> resources;     // 精确 URI 订阅
+    std::vector<std::string> resources;     // 2025 用；2026 非空 → -32602（D18）
 };
 
 struct AuthContext {
@@ -345,7 +345,9 @@ struct RequestContext {
     RequestId id;
     Method method;
     Json inputResponses;         // MRTR retry 的客户端输入
+    Json clientCapabilities;     // 2026 `_meta["io.modelcontextprotocol/clientCapabilities"]`（D18）
     std::optional<std::string> requestState;
+    std::optional<RequestId> subscriptionId; // 订阅流上下文（D18）
     std::shared_ptr<CancellationToken> cancellation;
     // version/era/meta/auth/trace 随 P3/P4 加入；当前实现只保留以上字段。
 };
@@ -581,8 +583,10 @@ public:
 | `GET /mcp` | 可选 SSE stream | **405** |
 | `DELETE /mcp` | 可选终止 session | **405** |
 | Session | `MCP-Session-Id` | 无 |
-| 版本 header | `MCP-Protocol-Version` | `MCP-Protocol-Version` + `_meta` 一致 |
+| 版本 header | `MCP-Protocol-Version` | `MCP-Protocol-Version` 必须等于 `params._meta["io.modelcontextprotocol/protocolVersion"]`；缺失/不一致 → 400 + `-32020` |
 | `Mcp-Method`/`Mcp-Name` | 不要求/视实现 | 必须校验 |
+
+**2026 请求校验（D18）**：`params._meta` 必须含 `io.modelcontextprotocol/protocolVersion` 与 `io.modelcontextprotocol/clientCapabilities`；缺失/类型错 → `-32602` + HTTP 400。`initialize`/`ping`/`logging/setLevel`/`resources/subscribe`/`resources/unsubscribe`/未知方法 → HTTP 404 + `-32601`。错误一律回显请求 id。
 
 ### 10.2 组件
 
@@ -616,6 +620,9 @@ struct StreamableHttpServerOptions {
     std::shared_ptr<IAdmissionHook> admission; // 传输层限流/紧急请求准入
     std::string emergencyPath = "/emergency";
     bool dedicatedEmergencyListener = false;
+    std::vector<std::string> allowedHosts;    // 空 = 仅 loopback Host（D18）
+    std::vector<std::string> allowedOrigins;  // 空 = 仅缺失/loopback Origin（D18）
+    std::vector<std::string> supportedVersions; // 由 McpServer 从 ServerOptions 推送（D18）
     TlsOptions tls;                  // 无条件存在
     std::shared_ptr<ITimeSource> timeSource; // nullptr = 系统时钟；无条件字段
     // schema/auth/executor 归 ServerOptions，避免重复所有权
@@ -797,7 +804,7 @@ public:
 | 版本协商 | initialize 参数 + header | `MCP-Protocol-Version` + `_meta` 一致；不支持 → `-32022` |
 | Session | 创建/保存 `MCP-Session-Id` | 无 session |
 | 运行 | 请求/响应 + 可选 GET stream | 请求/响应 + per-request SSE/订阅 |
-| 订阅 | `resources/subscribe` 等 | `subscriptions/listen` + `resourceSubscriptions` |
+| 订阅 | `resources/subscribe` 等 | `subscriptions/listen` + `params.notifications` 布尔 filter（D18） |
 | 关闭 | DELETE session/关闭 stream | 关闭 SSE/HTTP；无 session 可删 |
 
 **P3 实现约定（2025，本节为权威）**：
@@ -829,11 +836,9 @@ public:
 - **缓存**：2026 list/read 结果带 `ttlMs`/`cacheScope`；2025 不伪造这些字段。
 - **MRTR**：handler 返回 `OperationOutcome<T>` 的 `InputRequired`（`inputRequests`/`requestState` 至少一个）；adapter 输出 `resultType=input_required`。**重试是客户端发起的新请求**：客户端选择新的 JSON-RPC id，原样回传 `requestState`，并带 `inputResponses`；服务端不得指定新 id。适用于 `tools/call`、`resources/read`、`prompts/get`（`ToolOutcome`/`ResourceOutcome`/`PromptOutcome`）。
 - **MRTR 校验**：adapter 校验 `requestState` 完整性/轮次/过期；缺失 `inputResponses` 或状态被篡改 → `-32602`/tool error；多轮按 `requestState` 继续。**P2b 实现边界**：库只做结构性校验（`requestState` 与 `inputResponses` 成对、类型正确、原样回传）；`requestState` 的完整性/签名/轮次由应用自行编码与校验（D10 安全边界）。
-- **订阅**：客户端用 `SubscriptionFilter`（list_changed + `resourceSubscriptions`）；2026 `subscriptions/listen` 先回 `notifications/subscriptions/acknowledged`（带 `subscriptionId`），再做过滤协商；不支持的类型省略或拒绝，不接受任意事件类型。2025 用对应资源订阅/通知。
-  - **P2b wire 形状**（本节为权威）：请求 `subscriptions/listen` 的 params 为
-    `{"subscriptions":{"listChanged":["tools"|"prompts"|"resources"],"resources":["<uri>"]}}`，两个数组都可省略；未知 `listChanged` 值 → `-32602`。
-  - 响应是 SSE 流：首个事件 `notifications/subscriptions/acknowledged`，params `{"subscriptionId":"s1","requestId":<原请求 id>}`；之后每个事件都带同一个 `subscriptionId` 便于客户端在共享连接上路由。
-  - 通知：`notifications/resources/updated`（params 含 `uri` + `subscriptionId`）、`notifications/{tools,prompts,resources}/list_changed`（params 含 `subscriptionId`）。流不发送最终 JSON-RPC 响应；连接关闭即订阅结束。
+- **订阅（D18 权威）**：客户端用 `SubscriptionFilter`；2026 `subscriptions/listen` 的请求 params 为 `{"notifications":{"toolsListChanged":bool,"promptsListChanged":bool,"resourcesListChanged":bool}}`（未知/不支持的字段可拒绝或省略）。
+  - 首帧必须是 `notifications/subscriptions/acknowledged`；params 含 `_meta["io.modelcontextprotocol/subscriptionId"]`（值 = `subscriptions/listen` 的 JSON-RPC id）与 `notifications`（服务端实际接受的子集）。
+  - 该流所有通知的 `params._meta["io.modelcontextprotocol/subscriptionId"]` 必须等于上述 id；不再使用顶层 `subscriptionId`/`requestId`。
   - 2025 对 `subscriptions/listen` 返回 `-32601`；stdio 等非流式传输返回 `-32603` + `data.reason="subscriptions_require_stream"`。
 - **服务端推送 hooks**：`notifyResourceUpdated(uri)`/`notifyListChanged(kind)` 只向已订阅者投递；`SseSink::send(..., eventId)` 用于 2025 per-stream replay；2026 显式关闭，不依赖 Last-Event-ID。
 - **2025 server→client 请求**：adapter 通过 `ClientEventSink::onRequest(request, responder)` 交给客户端；`setRequestHandler("roots/list"/"sampling/createMessage"/"elicitation/create")`；按 `ClientCapabilities` gate；未注册返回 method-not-found。2026 不发起该路径，改用 MRTR `input_required`。
@@ -892,6 +897,7 @@ struct ServerOptions {
     bool useInlineExecutor = false;                 // true = transport 线程同步执行（测试/单线程宿主）
     std::shared_ptr<IResourceProvider> resources;   // 可选；P2b 每类最多一个 provider（见 §14 说明）
     std::shared_ptr<IPromptProvider> prompts;       // 可选
+    std::shared_ptr<ICompletionProvider> completions; // 可选；completion/complete（D18）
     std::shared_ptr<ITimeSource> timeSource;        // nullptr = 系统时钟；无条件字段
     bool allowUnvalidatedTools = false;             // 默认 false
     bool enableLegacySse = false;                   // 默认 false
@@ -929,6 +935,15 @@ public:
     virtual Result<PromptOutcome> get(std::string_view name, const Json& args, RequestContext&) = 0;
 };
 
+// D18: completion/complete. A null provider still answers with an empty
+// values array (conformance minimum); providers supply real candidates.
+class ICompletionProvider {
+public:
+    virtual ~ICompletionProvider() = default;
+    virtual Result<Json> complete(const Json& ref, const Json& argument,
+                                  RequestContext&) = 0;
+};
+
 class McpServer {
 public:
     explicit McpServer(ServerOptions);
@@ -953,8 +968,9 @@ public:
 | 发现 | `DiscoverResult`/`InitializeResult` 的 `serverInfo`/`instructions`/`capabilities` 由 `ServerOptions` 填充 |
 | 同步/异步 | handler 可同步返回；`IExecutor` 决定线程；异步 handler 用 `std::future<Result<ToolOutcome>>` 适配 |
 | Schema | 注册时编译 `inputSchema`；调用前校验；失败 `-32602`/tool error；`outputSchema` 校验 `structuredContent` |
+| Completion | `completion/complete`；`completions` capability；provider 为 null 时返回空 `values`；ref 支持 prompt/resource template（D18） |
 | Auth | transport/adapter 调 `IAuthenticator`；`IAuthorizer` 决定 tool 可用性；库不内置角色模型 |
-| listChanged | 注册/移除后发 `notifications/tools/list_changed` 等；仅在协议支持时 |
+| listChanged | 注册/移除后由宿主显式 `notifyListChanged`；自动通知延后到 P4（D18） |
 | 关闭 | 停止接受新请求 → 取消/等待 handler → 关闭 SSE 流 → 关闭 transport → executor drain → join |
 
 ---
@@ -1020,6 +1036,8 @@ public:
 | 取消 | `cancel(id, CancelMode)`：2026 HTTP 关闭 SSE stream；2025 发规范通知；pending registry 清理；超时释放 |
 | MRTR | 客户端发起新 JSON-RPC id；原样回传 `requestState`；带 `inputResponses`；支持多轮；adapter 校验轮次/篡改 |
 | 2025 server requests | `setRequestHandler("roots/list"/"sampling/createMessage"/"elicitation/create", ...)`；按协商能力 gate；2026 用 MRTR |
+| 2026 `_meta` | client 必须注入 `io.modelcontextprotocol/protocolVersion` + `clientCapabilities`（`clientInfo` SHOULD）；`progressToken` 仍为普通键（D18） |
+| 订阅路由 | 2026 客户端按 `params._meta["io.modelcontextprotocol/subscriptionId"]`（与 listen 请求 id 同 JSON 类型）关联回调，不再读顶层 `subscriptionId`（D18） |
 | 错误 | `Result` 返回；网络/HTTP 错误映射为 `McpError`；不抛异常穿越 API |
 
 ---
