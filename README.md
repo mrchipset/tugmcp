@@ -18,6 +18,9 @@
 | [`designs/protocol-decisions.md`](./designs/protocol-decisions.md) | 已定协议/传输/依赖决策（ADR） |
 | [`designs/header-only.md`](./designs/header-only.md) | header-only 可行性、单头 artifact、取舍与工量评估 |
 | [`designs/testing.md`](./designs/testing.md) | 测试分层、框架选型（doctest）、目录/target、CI 矩阵 |
+| [`docs/api.md`](./docs/api.md) | 公共 API：类型、错误语义、server/client/transport、hooks 与扩展点 |
+| [`docs/building.md`](./docs/building.md) | 前置条件、依赖策略、全部构建开关、构建/测试命令、target、测试数量与常见问题 |
+| [`docs/integration.md`](./docs/integration.md) | 三种消费方式、stdio/HTTP server 与 client 嵌入、executor/关闭、安全 hooks、schema 与部署清单 |
 | [`docs/amalgamation.md`](./docs/amalgamation.md) | 单头产物矩阵、消费/链接、TLS 宏/ODR、生成与发布、哈希/许可证策略 |
 | [`docs/roadmap.md`](./docs/roadmap.md) | 里程碑完成度、设计章节落地状态与下一步优先级 |
 

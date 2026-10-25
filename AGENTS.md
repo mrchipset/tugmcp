@@ -42,6 +42,9 @@ tugmcp/
   docs/
     roadmap.md                 # 里程碑完成度与后续优先级（非设计权威）
     amalgamation.md            # 单头发布产物、消费/链接/发布与限制
+    api.md                     # 公共 API 参考（按当前头文件）
+    building.md                # 构建、测试、CMake 开关
+    integration.md             # 宿主集成、消费方式、线程/安全边界
   include/tugmcp/
     core.hpp
     server.hpp
@@ -73,6 +76,11 @@ tugmcp/
 | `designs/protocol-decisions.md` | 已定决策与理由，改决策必须先改这里 |
 | `designs/header-only.md` | header-only vs 编译库的取舍与工量 |
 | `designs/testing.md` | 测试分层、框架、目录/target、CI 与覆盖率口径 |
+| `docs/api.md` | 公共 API 参考：类型、错误、server/client/transport、hooks、扩展点 |
+| `docs/building.md` | 前置条件、依赖、全部构建开关、构建/测试命令与 target |
+| `docs/integration.md` | 宿主集成方式、stdio/HTTP server/client、executor、安全与部署边界 |
+| `docs/amalgamation.md` | 单头发布产物、链接/TLS/ODR、生成与发布 |
+| `docs/roadmap.md` | 里程碑/设计章节落地状态（非设计权威） |
 
 ## 5. 架构不变量
 
