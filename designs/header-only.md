@@ -57,7 +57,7 @@ include/tugmcp/
 | 链接要求 | Windows `ws2_32`（TLS 时 `crypt32`）；线程用 `Threads::Threads`；TLS 需 OpenSSL ≥3.0；CMake target 必须写清 | 小 |
 | 可选依赖/宏 | `TUGMCP_WITH_HTTP`、`TUGMCP_WITH_JSONCONS`、`TUGMCP_WITH_VALIJSON`、`TUGMCP_TLS` 的一致性 | 小–中 |
 | ABI/实现隐藏 | header-only 暴露实现；DLL/插件场景不适合 | 设计取舍 |
-| 测试矩阵 | MSVC/GCC/Clang、单 TU/多 TU、header-only/编译模式、TLS on/off | 中 |
+| 测试矩阵 | MSVC/GCC/Clang、单 TU/多 TU、单头 artifact/编译模式、TLS on/off | 中 |
 
 单头 artifact 下 `CPPHTTPLIB_OPENSSL_SUPPORT` 无法在链接期检测跨 TU 不一致，因此消费方必须对所有看到 `httplib.h` 的 TU 使用同一产物/宏；编译模式下该宏为 PRIVATE，由 `detail/http_httplib.hpp` 的 `#error` 守卫兜底。
 
@@ -120,8 +120,8 @@ include/tugmcp/
   - schema（jsoncons/Valijson）与 legacy HTTP+SSE **不进入单头**。
 - **消费方式**：恰好一个 TU `#define TUGMCP_IMPLEMENTATION` 后 include；其余 TU 只 include。`TUGMCP_HEADER_ONLY` CMake 模式未实现，单头 artifact 不依赖它。
 - **生成规则**：按公共头依赖排序；去掉项目内 include/`#pragma once`，保留第三方 include；实现段由 `src/**` 合并到 `#ifdef TUGMCP_IMPLEMENTATION`；处理匿名命名空间/文件级 static/宏重名；输出确定性（无时间戳）。
-- **打包 target**：`amalgamate` 生成三个头；`amalgamate-release` 调用 `tools/package_amalgamation.py`，默认输出 `${CMAKE_BINARY_DIR}/amalgamation/release`（`TUGMCP_AMALGAMATION_RELEASE_DIR` 可覆盖）。发布目录含三个头、`SHA256SUMS`、`NOTICE`、`README.md`、`LICENSES/{nlohmann-json-MIT.txt,cpp-httplib-MIT.txt}`；项目版本 `0.1.0`，nlohmann/json `3.12.0`，cpp-httplib `0.63.0`。重复运行逐字节一致。
-- **哈希/许可证流程**：记录哈希在 `tests/amalgamation/{core,http,http_tls}.sha256`；打包脚本默认校验生成结果与记录哈希一致。许可证从 `LICENSES/` 原样复制。`SHA256SUMS` 覆盖三个头与两份许可证文本。第三方头始终外置，不内嵌。
+- **打包 target**：`amalgamate` 生成三个头；`amalgamate-release` 调用 `tools/package_amalgamation.py`，默认输出 `${CMAKE_BINARY_DIR}/amalgamation/release`（`TUGMCP_AMALGAMATION_RELEASE_DIR` 可覆盖）。发布目录含三个头、`LICENSE`（MIT）、`SHA256SUMS`、`NOTICE`、`README.md`、`LICENSES/{nlohmann-json-MIT.txt,cpp-httplib-MIT.txt}`；项目版本从 `CMakeLists.txt` 读取（当前 `0.1.0`），nlohmann/json `3.12.0`，cpp-httplib 版本从 `httplib.h` 读取并校验为 `0.63.0`。打包先写临时目录再整体替换；重复运行逐字节一致。
+- **哈希/许可证流程**：记录哈希在 `tests/amalgamation/{core,http,http_tls}.sha256`；打包脚本默认校验生成结果与记录哈希一致。项目 `LICENSE` 与第三方许可证从源码树原样复制。`SHA256SUMS` 覆盖 `LICENSE`、三个头与两份第三方许可证文本。第三方头始终外置，不内嵌。
 - **验收覆盖**：
   - `tests/amalgamation/run_tests.py`（`amalgamation.core`）：core 生成确定性、记录哈希、负向用例、双 TU/ODR、stdio 行为。
   - `tests/amalgamation/run_release.py`（`amalgamation.release`）：发布文件、`SHA256SUMS`、许可证/NOTICE/README、版本串、逐字节再生成；不需要 npx。

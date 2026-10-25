@@ -121,6 +121,7 @@ release/
   tugmcp.hpp
   tugmcp_http.hpp
   tugmcp_http_tls.hpp
+  LICENSE
   SHA256SUMS
   NOTICE
   README.md
@@ -129,10 +130,13 @@ release/
     cpp-httplib-MIT.txt
 ```
 
-`SHA256SUMS` 记录三个头与两个许可证文件的 SHA256，格式为
-`<sha256>  <相对路径>`，按路径排序。`NOTICE`/`README.md` 记录项目版本
-`0.1.0`、nlohmann/json `3.12.0`、cpp-httplib `0.63.0` 以及 artifact matrix。
-输出不含时间戳；同一输入重复运行必须逐字节一致。
+`SHA256SUMS` 记录项目 `LICENSE`、三个头与两个第三方许可证文件的 SHA256，
+格式为 `<sha256>  <相对路径>`，按路径排序。`NOTICE`/`README.md` 记录项目版本
+（从 `CMakeLists.txt` 读取，当前 `0.1.0`）、nlohmann/json `3.12.0`、
+cpp-httplib `0.63.0`（从 `3rd/cpp-httplib/httplib.h` 的 `CPPHTTPLIB_VERSION`
+读取并校验）以及 artifact matrix。输出不含时间戳；同一输入重复运行必须逐字节
+一致。打包先写入同父目录的临时 staging 目录，成功后整体替换 release 目录，
+因此不会混入旧文件。
 
 ## 5. 哈希与许可证政策
 
@@ -146,10 +150,13 @@ release/
 
   打包脚本默认校验生成结果与记录哈希一致；故意变更产物时必须同步更新对应
   `.sha256`，否则 `package_amalgamation.py` 与测试都会失败。
-- 许可证文本从仓库 `LICENSES/` 原样复制，不重写、不重新排版。
+- **项目许可证**：tugmcp 采用 MIT；根 `LICENSE` 原样复制到发布目录，其 hash
+  进入 `SHA256SUMS`。`NOTICE`/README 指向随包 `LICENSE`，不再引用外部仓库。
+- **第三方许可证**：nlohmann/json 与 cpp-httplib 均为 MIT，文本从仓库
+  `LICENSES/` 原样复制，不重写、不重新排版。
 - 第三方依赖版本/commit：nlohmann/json `3.12.0`
   （commit `55f93686c01528224f448c19128836e7df245f72`）；cpp-httplib
-  `0.63.0`（`3rd/README.md` 未登记其上游 commit，使用 vendored header 的
+  `0.63.0`（`3rd/README.md` 未登记上游 commit，使用 vendored header 的
   SHA256 `9021001a719768893a8a6e4051c56107690e8b8e49b41e5f903534fa19ae9afb`
   作为可复现身份）。
 - cpp-httplib 与 nlohmann/json 的许可证已经聚合在 `LICENSES/`；发布包只带
@@ -157,12 +164,27 @@ release/
 
 ## 6. 验证命令
 
+前置条件：
+
+- Python 3 用于 `amalgamate` / `run_release.py` / `run_tests.py`（无需网络）。
+- 手工校验 `SHA256SUMS` 需要 coreutils 的 `sha256sum`（`sha256sum -c SHA256SUMS`）；
+  没有 coreutils 时可用 OpenSSL（≥ 1.1.1/3.0）：
+  `openssl dgst -sha256 -r LICENSE tugmcp.hpp ...`，再与 `SHA256SUMS` 对照。
+- `run_external.py` 额外需要 Node/npx（MCP Inspector 与官方 conformance）。
+
 ```bash
 # 生成、记录哈希、双 TU/ODR、stdio 行为（无需 npx）
 python tests/amalgamation/run_tests.py
 
-# 打包目录、哈希、许可证、版本、确定性再生成（无需 npx）
+# 打包目录、哈希、LICENSE/第三方许可证、版本、确定性再生成（无需 npx）
 python tests/amalgamation/run_release.py
+
+# 只校验已有发布目录（不重新生成）
+python tools/package_amalgamation.py --verify-only \
+  --release-dir build/amalgamation/release
+
+# 手工校验（coreutils）
+cd build/amalgamation/release && sha256sum -c SHA256SUMS
 
 # 外部验证：MCP Inspector + 官方 conformance（需要 Node/npx）
 python tests/amalgamation/run_external.py

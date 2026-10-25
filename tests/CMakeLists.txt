@@ -116,7 +116,7 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME amalgamation.release
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/run_release.py
-      --release-dir ${CMAKE_BINARY_DIR}/amalgamation/release)
+      --release-dir "${TUGMCP_AMALGAMATION_RELEASE_DIR}")
   set_tests_properties(amalgamation.release PROPERTIES
     LABELS amalgamation
     TIMEOUT 300

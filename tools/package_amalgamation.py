@@ -18,21 +18,25 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import os
 import re
 import shutil
 import sys
+import tempfile
+import time
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "tools" / "amalgamate.py"
 LICENSES = ROOT / "LICENSES"
 RECORDED_HASHES = ROOT / "tests" / "amalgamation"
+PROJECT_LICENSE = ROOT / "LICENSE"
+HTTPLIB_HEADER = ROOT / "3rd" / "cpp-httplib" / "httplib.h"
 
-PROJECT_VERSION = "0.1.0"
 NLOHMANN_JSON_VERSION = "3.12.0"
 NLOHMANN_JSON_COMMIT = "55f93686c01528224f448c19128836e7df245f72"
-HTTPLIB_VERSION = "0.63.0"
+EXPECTED_HTTPLIB_VERSION = "0.63.0"
 # 3rd/README.md does not record a cpp-httplib upstream commit; the vendored
 # header hash from cmake/verify_hashes.cmake is the reproducible identity.
 HTTPLIB_FILE_SHA256 = (
@@ -47,6 +51,13 @@ ARTIFACTS: Sequence[Tuple[str, str, bool, str]] = (
 )
 
 LICENSE_FILES = ("nlohmann-json-MIT.txt", "cpp-httplib-MIT.txt")
+
+ARTIFACT_HASHES = {
+    "tugmcp.hpp": "core.sha256",
+    "tugmcp_http.hpp": "http.sha256",
+    "tugmcp_http_tls.hpp": "http_tls.sha256",
+}
+
 
 README = """\
 # tugmcp single-header release artifacts
@@ -107,7 +118,10 @@ macros. Never mix the TLS artifact with `tugmcp_http.hpp`/`tugmcp.hpp` in one
 program or process, and do not define these macros differently per TU: the
 result is an ODR violation that the linker cannot detect.
 
-## Third-party dependencies and licenses
+## Licenses
+
+tugmcp itself is licensed under the **MIT License**; the full text is bundled as
+`LICENSE` and its hash is listed in `SHA256SUMS`.
 
 The artifacts keep third-party headers external:
 
@@ -115,8 +129,34 @@ The artifacts keep third-party headers external:
 - cpp-httplib {httplib_version} (vendored header SHA256 `{httplib_sha}`), MIT.
 
 Their license texts are bundled under `LICENSES/`. `SHA256SUMS` records the
-hashes of the three headers and the bundled licenses. License texts are copied
-verbatim from `LICENSES/` in the source tree.
+hashes of the three headers, the project `LICENSE`, and the bundled third-party
+licenses. License texts are copied verbatim from the source tree.
+
+## Verifying a release
+
+Regenerating or verifying the package requires Python 3.8+ (no network):
+
+```bash
+python tools/package_amalgamation.py --verify-only \
+  --release-dir build/amalgamation/release
+```
+
+Manual checksum verification needs a POSIX shell with `sha256sum` (coreutils):
+
+```bash
+cd build/amalgamation/release
+sha256sum -c SHA256SUMS
+```
+
+Without `sha256sum`, OpenSSL can verify individual files:
+
+```bash
+openssl dgst -sha256 -r LICENSE tugmcp.hpp tugmcp_http.hpp tugmcp_http_tls.hpp
+```
+
+Compare those digests with `SHA256SUMS`. The repository checkout provides the
+strongest check (`tests/amalgamation/run_release.py`), which also re-generates
+the artifacts to prove deterministic output.
 
 ## Regeneration
 
@@ -142,10 +182,13 @@ tugmcp single-header release artifacts
 
 Project:          tugmcp
 Project version:  {project}
+Project license:  MIT (LICENSE)
 
 This directory contains generated single-header copies of the tugmcp C++17 MCP
 library. The split headers in include/ and implementation in src/ remain the
 source of truth.
+
+tugmcp is licensed under the MIT License. The full text is bundled as LICENSE.
 
 Artifact matrix
 ---------------
@@ -165,9 +208,6 @@ cpp-httplib {httplib_version}
   vendored header SHA256: {httplib_sha}
   license: MIT (LICENSES/cpp-httplib-MIT.txt)
 
-tugmcp itself is distributed under the terms of this project. See the project
-repository for its license.
-
 Consumption summary
 -------------------
 Define TUGMCP_IMPLEMENTATION in exactly one translation unit before including a
@@ -177,7 +217,9 @@ crypt32. All TUs must agree on TUGMCP_TLS_ENABLED and CPPHTTPLIB_OPENSSL_SUPPORT
 
 Integrity
 ---------
-SHA256SUMS lists the hashes of the generated headers and bundled licenses.
+SHA256SUMS lists the hashes of LICENSE, the generated headers and the bundled
+third-party licenses. Verify with `sha256sum -c SHA256SUMS` (coreutils) or
+`openssl dgst -sha256` on individual files.
 """
 
 
@@ -213,6 +255,20 @@ def write_text(path: Path, text: str) -> None:
     write_bytes(path, text.encode("utf-8"))
 
 
+def replace_with_retry(source: Path, target: Path) -> None:
+    """``os.replace`` with a short retry for Windows directory locks."""
+    last_error: PermissionError | None = None
+    for _ in range(30):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as error:
+            last_error = error
+            time.sleep(0.1)
+    assert last_error is not None
+    raise last_error
+
+
 def read_recorded_hash(name: str) -> str:
     path = RECORDED_HASHES / name
     if not path.is_file():
@@ -221,6 +277,63 @@ def read_recorded_hash(name: str) -> str:
     if not tokens or not re.fullmatch(r"[0-9a-fA-F]{64}", tokens[0]):
         raise PackagingError(f"recorded hash file is malformed: {path}")
     return tokens[0].lower()
+
+
+def project_version() -> str:
+    """Read ``project(tugmcp VERSION x.y.z ...)`` from the root CMakeLists."""
+    cmake = ROOT / "CMakeLists.txt"
+    text = cmake.read_text(encoding="utf-8")
+    match = re.search(
+        r"project\s*\(\s*tugmcp\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)",
+        text,
+    )
+    if not match:
+        raise PackagingError(f"project version not found in {cmake}")
+    return match.group(1)
+
+
+def httplib_version() -> str:
+    """Read and validate ``CPPHTTPLIB_VERSION`` from the vendored header."""
+    text = HTTPLIB_HEADER.read_text(encoding="utf-8")
+    match = re.search(
+        r'#define\s+CPPHTTPLIB_VERSION\s+"([^"]+)"', text
+    )
+    if not match:
+        raise PackagingError(f"CPPHTTPLIB_VERSION not found in {HTTPLIB_HEADER}")
+    version = match.group(1)
+    if version != EXPECTED_HTTPLIB_VERSION:
+        raise PackagingError(
+            f"cpp-httplib version mismatch: header has {version}, "
+            f"packaging expects {EXPECTED_HTTPLIB_VERSION}"
+        )
+    return version
+
+
+def read_sums(release_dir: Path) -> Dict[str, str]:
+    path = release_dir / "SHA256SUMS"
+    if not path.is_file():
+        raise PackagingError(f"SHA256SUMS is missing: {path}")
+    entries: Dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if not match:
+            raise PackagingError(f"malformed SHA256SUMS line: {line!r}")
+        digest, name = match.groups()
+        if name in entries:
+            raise PackagingError(f"duplicate SHA256SUMS entry: {name}")
+        entries[name] = digest
+    return entries
+
+
+def expected_release_files() -> Dict[str, bytes]:
+    """Return the exact managed file set and their expected bytes."""
+    files: Dict[str, bytes] = {}
+    files["LICENSE"] = PROJECT_LICENSE.read_bytes()
+    for name in LICENSE_FILES:
+        files[f"LICENSES/{name}"] = (LICENSES / name).read_bytes()
+    return files
 
 
 def generate_artifacts(release_dir: Path, verify_hashes: bool) -> Dict[str, str]:
@@ -269,39 +382,156 @@ def write_sums(release_dir: Path, hashes: Dict[str, str]) -> None:
     write_text(release_dir / "SHA256SUMS", "\n".join(lines) + "\n")
 
 
-def package(release_dir: Path, verify_hashes: bool = True) -> Dict[str, str]:
-    release_dir.mkdir(parents=True, exist_ok=True)
-    # Remove files this script owns so a stale artefact cannot survive.
-    for name, _profile, _tls, _guard in ARTIFACTS:
-        (release_dir / name).unlink(missing_ok=True)
-    for name in ("SHA256SUMS", "NOTICE", "README.md"):
-        (release_dir / name).unlink(missing_ok=True)
-    shutil.rmtree(release_dir / "LICENSES", ignore_errors=True)
+def render_metadata(project: str, httplib: str) -> Tuple[str, str]:
+    values = dict(
+        project=project,
+        nlohmann_version=NLOHMANN_JSON_VERSION,
+        nlohmann_commit=NLOHMANN_JSON_COMMIT,
+        httplib_version=httplib,
+        httplib_sha=HTTPLIB_FILE_SHA256,
+    )
+    return NOTICE.format(**values), README.format(**values)
 
+
+def write_package(
+    release_dir: Path, verify_hashes: bool, project: str, httplib: str
+) -> Dict[str, str]:
     hashes = generate_artifacts(release_dir, verify_hashes)
     license_hashes = copy_licenses(release_dir)
 
-    notice = NOTICE.format(
-        project=PROJECT_VERSION,
-        nlohmann_version=NLOHMANN_JSON_VERSION,
-        nlohmann_commit=NLOHMANN_JSON_COMMIT,
-        httplib_version=HTTPLIB_VERSION,
-        httplib_sha=HTTPLIB_FILE_SHA256,
-    )
-    readme = README.format(
-        project=PROJECT_VERSION,
-        nlohmann_version=NLOHMANN_JSON_VERSION,
-        nlohmann_commit=NLOHMANN_JSON_COMMIT,
-        httplib_version=HTTPLIB_VERSION,
-        httplib_sha=HTTPLIB_FILE_SHA256,
-    )
+    # Project license (MIT) is part of the release and of SHA256SUMS.
+    if not PROJECT_LICENSE.is_file():
+        raise PackagingError(f"project license not found: {PROJECT_LICENSE}")
+    license_payload = PROJECT_LICENSE.read_bytes()
+    write_bytes(release_dir / "LICENSE", license_payload)
+
+    notice, readme = render_metadata(project, httplib)
     write_text(release_dir / "NOTICE", notice)
     write_text(release_dir / "README.md", readme)
 
-    # Hash the headers and licenses only: README/NOTICE are descriptive and
-    # their own hashes would make SHA256SUMS self-referential to edit.
-    write_sums(release_dir, {**hashes, **license_hashes})
+    # README/NOTICE are descriptive; exclude their own hashes so SHA256SUMS is
+    # not self-referential.
+    write_sums(
+        release_dir,
+        {
+            **hashes,
+            **license_hashes,
+            "LICENSE": sha256_bytes(license_payload),
+        },
+    )
     return hashes
+
+
+def package(release_dir: Path, verify_hashes: bool = True) -> Dict[str, str]:
+    """Build into a staging directory, then swap it into place."""
+    release_dir = release_dir.resolve()
+    parent = release_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    project = project_version()
+    httplib = httplib_version()
+
+    stage = Path(
+        tempfile.mkdtemp(prefix=f".{release_dir.name}.stage-", dir=str(parent))
+    )
+    backup: Path | None = None
+    installed = False
+    try:
+        hashes = write_package(stage, verify_hashes, project, httplib)
+        if release_dir.exists():
+            backup = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{release_dir.name}.old-", dir=str(parent)
+                )
+            )
+            os.rmdir(backup)
+            replace_with_retry(release_dir, backup)
+        replace_with_retry(stage, release_dir)
+        installed = True
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)
+            backup = None
+    except BaseException:
+        if (
+            not installed
+            and backup is not None
+            and backup.exists()
+            and not release_dir.exists()
+        ):
+            replace_with_retry(backup, release_dir)
+            backup = None
+        raise
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        # Keep the backup if a failed swap could not be rolled back, so the
+        # previous release is recoverable instead of silently lost.
+        if backup is not None and backup.exists() and (
+            installed or release_dir.exists()
+        ):
+            shutil.rmtree(backup, ignore_errors=True)
+    return hashes
+
+
+def verify_release(release_dir: Path) -> Dict[str, str]:
+    """Validate an existing release directory without regenerating it."""
+    release_dir = release_dir.resolve()
+    if not release_dir.is_dir():
+        raise PackagingError(f"release directory not found: {release_dir}")
+
+    sums = read_sums(release_dir)
+    expected_managed = expected_release_files()
+    managed = {name for name, _profile, _tls, _guard in ARTIFACTS}
+    managed |= set(expected_managed)
+    managed |= {"SHA256SUMS", "NOTICE", "README.md"}
+
+    actual_files = {
+        path.relative_to(release_dir).as_posix()
+        for path in release_dir.rglob("*")
+        if path.is_file()
+    }
+    missing = managed - actual_files
+    unknown = actual_files - managed
+    if missing:
+        raise PackagingError(
+            "release directory is missing files: " + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise PackagingError(
+            "release directory has unknown files: " + ", ".join(sorted(unknown))
+        )
+
+    for name, expected_payload in expected_managed.items():
+        path = release_dir / name
+        if path.read_bytes() != expected_payload:
+            raise PackagingError(f"{name} differs from the source tree")
+        if name not in sums:
+            raise PackagingError(f"{name} is not listed in SHA256SUMS")
+        if sha256_file(path) != sums[name]:
+            raise PackagingError(f"SHA256SUMS mismatch for {name}")
+
+    for name, _profile, _tls, _guard in ARTIFACTS:
+        path = release_dir / name
+        actual = sha256_file(path)
+        if name not in sums or sums[name] != actual:
+            raise PackagingError(f"SHA256SUMS mismatch for {name}")
+        hash_name = ARTIFACT_HASHES[name]
+        recorded = read_recorded_hash(hash_name)
+        if actual != recorded:
+            raise PackagingError(
+                f"{name} does not match tests/amalgamation/{hash_name}: "
+                f"expected {recorded}, packaged {actual}"
+            )
+
+    project = project_version()
+    httplib = httplib_version()
+    notice = (release_dir / "NOTICE").read_text(encoding="utf-8")
+    readme = (release_dir / "README.md").read_text(encoding="utf-8")
+    expected_notice, expected_readme = render_metadata(project, httplib)
+    if notice != expected_notice:
+        raise PackagingError("NOTICE metadata is stale or was edited by hand")
+    if readme != expected_readme:
+        raise PackagingError("release README metadata is stale or edited by hand")
+    return sums
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -313,6 +543,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="output directory (default: build/amalgamation/release)",
     )
     parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="validate an existing release directory without repackaging",
+    )
+    parser.add_argument(
         "--skip-hash-check",
         action="store_true",
         help="do not compare against tests/amalgamation/*.sha256",
@@ -321,16 +556,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     release_dir = args.release_dir.resolve()
     try:
-        hashes = package(release_dir, verify_hashes=not args.skip_hash_check)
+        if args.verify_only:
+            hashes = verify_release(release_dir)
+            action = "verified"
+        else:
+            hashes = package(release_dir, verify_hashes=not args.skip_hash_check)
+            action = "wrote"
     except PackagingError as error:
         print(f"package_amalgamation: error: {error}", file=sys.stderr)
         return 1
 
-    print(f"package_amalgamation: wrote {release_dir}")
+    print(f"package_amalgamation: {action} {release_dir}")
     for name, _profile, _tls, _guard in ARTIFACTS:
         size = (release_dir / name).stat().st_size
         print(f"  {name}  {size} bytes  {hashes[name]}")
-    print(f"  SHA256SUMS, NOTICE, README.md, LICENSES/"
+    print("  SHA256SUMS, LICENSE, NOTICE, README.md, LICENSES/"
           f"{{{','.join(LICENSE_FILES)}}}")
     return 0
 

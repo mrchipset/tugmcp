@@ -16,7 +16,7 @@
 | 确定性 | 同一输入在任意机器、任意并发调度下得到同一结论；不以时间/顺序偶然性通过。 |
 | 可诊断 | 失败信息直接指出“哪条断言、期望值、实际值、对应设计条目”，无需二次调试。 |
 | 分层 | 单元、fake、vectors、loopback、负例、ODR、conformance、性能各自独立，可单独筛选运行。 |
-| 双形态一致 | `TUGMCP_HEADER_ONLY` ON/OFF、`TUGMCP_TLS` ON/OFF 跑同一测试集，行为一致。 |
+| 双形态一致 | 编译库与单头发布 artifact、`TUGMCP_TLS` ON/OFF 跑同一测试集，行为一致；split-header `TUGMCP_HEADER_ONLY` 模式未实现。 |
 
 ### 1.2 非目标
 
@@ -120,7 +120,7 @@ tests/
 | `tugmcp_odr_tests` | 可执行 | `unit` | 双 TU ODR 链接检查；`tu_a.cpp`/`tu_b.cpp` 各含最小 `TEST_CASE`，只 include 公共头 |
 
 - 每个可执行**只打一个主 label**：`unit`/`integration`/`tls`/`slow`/`win-only`/`conformance`。TLS 与 slow 必须是独立可执行，避免同一 exe 混合快线/夜线语义。
-- `tugmcp_unit_tests`/`tugmcp_integration_tests`/`tugmcp_odr_tests`/`tugmcp_executor_tests`/`tugmcp_conformance_tests` 始终编译（`TUGMCP_BUILD_TESTS=ON` 时），不受 `TUGMCP_HEADER_ONLY` 影响；该开关只切换库 target（`tugmcp::core`/`tugmcp::http`/`tugmcp::schema_*`）为 INTERFACE（D9）。`tugmcp_tls_tests`/`tugmcp_slow_tests`/`tugmcp_schema_tests` 随对应开关条件构建，`tugmcp_win_stdio_tests` 仅 `WIN32` 构建。
+- `tugmcp_unit_tests`/`tugmcp_integration_tests`/`tugmcp_odr_tests`/`tugmcp_executor_tests`/`tugmcp_conformance_tests` 始终编译（`TUGMCP_BUILD_TESTS=ON` 时）；split-header `TUGMCP_HEADER_ONLY` 模式未实现，单头验证通过 `tests/amalgamation/` 的独立 consumer/ODR 测试完成。`tugmcp_tls_tests`/`tugmcp_slow_tests`/`tugmcp_schema_tests` 随对应开关条件构建，`tugmcp_win_stdio_tests` 仅 `WIN32` 构建。
 - `tugmcp::tests` 只放 helper 头，不复制库内部实现；helper 的行为必须是“可预期的假实现”，不是第二套协议栈。
 
 ### 4.3 doctest 约定
@@ -330,7 +330,7 @@ endif()
 | 取消/进度 | `CancelMode` 三态（`Auto`/`CloseStream`/`Notification`）；超时同时取消 pending 与 handler；progress 仅在带 token 时发送 | `tugmcp_integration_tests` | §7.1；§19 Async；§16 |
 | 背压/关闭 | 队列满返回 `QueueFull`；断连清理；shutdown 严格遵循主设计 §16（关闭顺序：停新请求→取消/等待→关流→关 transport→drain→join），本文不另立版本 | `tugmcp_integration_tests` | §8；§16；§19 Backpressure |
 | TLS reason 矩阵 | 按 §6.2 的 `reason × 构建状态 × 角色/观测点` 逐行断言；TLS-off 的创建期失败用 `CountingListener` 断言 accept 次数 = 0；TLS-on 握手/证书/mTLS | `tugmcp_tls_tests` | D14；§18.1；§19 Security |
-| ODR | 双 TU 同时 include 公共头链接无重复符号；`tu_a.cpp`/`tu_b.cpp` 各含一个最小 `TEST_CASE`；`TUGMCP_HEADER_ONLY` ON/OFF 同一测试集行为一致 | `tugmcp_odr_tests` | D9；`header-only.md` §7 |
+| ODR | 双 TU 同时 include 单头（一个 TU 定义 `TUGMCP_IMPLEMENTATION`）链接无重复符号；`consumer_*_tu2.cpp` 不含实现宏；split-header `TUGMCP_HEADER_ONLY` 模式未实现 | `tests/amalgamation`（`amalgamation.core`/`http`/TLS ODR） | D9；`docs/amalgamation.md` |
 | Schema | 无 validator 时 fail closed；validator 编译一次多次调用；`outputSchema` 校验 `structuredContent` | `tugmcp_schema_tests` | §17.1/§17.2；M1.5 |
 | Canonical | 键序/数字/UTF-8/无 NaN；`tool_schema_hash` 对等价输入稳定、对实质变更敏感 | `tugmcp_unit_tests` | §17.3；M1.5 |
 | Resources | `resources/templates/list` 分页 `cursor`/`nextCursor`；cache 字段位于 Page envelope；authorized filtering；traversal/非法 URI 拒绝 | `tugmcp_integration_tests` | §13.4；§19 Resources |
@@ -447,13 +447,13 @@ openssl rsa  -in tests/fixtures/tls/server.key  -noout -modulus | openssl sha256
 |---|---|---|---|
 | 1 | GCC Debug | `TUGMCP_TLS=OFF`，编译模式 | 主快线，覆盖 unit/integration 与 ODR |
 | 2 | MSVC 2022 x64 Debug | `TUGMCP_TLS=OFF`，编译模式 | Windows stdio/链接差异 |
-| 3 | GCC Debug | `TUGMCP_HEADER_ONLY=ON`，`TUGMCP_TLS=OFF` | 验证 INTERFACE 消费与 ODR |
+| 3 | GCC Debug | 单头 release artifact 消费（`TUGMCP_TLS=OFF`） | 验证单头双 TU/ODR；split-header `TUGMCP_HEADER_ONLY` 模式未实现 |
 
 快线命令固定为 `ctest -L "unit|integration" -LE "slow|tls|win-only"`，**不得包含 `tls`/`slow` 可执行**；CI step timeout 120s，目标 < 60s。
 
 **夜线（全矩阵 + 扩展检查）**
 
-- 编译器 × 开关全矩阵：MSVC 2022 x64 / GCC 11 / Clang 15（AppleClang best-effort）× `TUGMCP_TLS` on/off × `TUGMCP_HEADER_ONLY` on/off × Debug/Release。
+- 编译器 × 开关全矩阵：MSVC 2022 x64 / GCC 11 / Clang 15（AppleClang best-effort）× `TUGMCP_TLS` on/off × 编译库/单头 artifact × Debug/Release；split-header `TUGMCP_HEADER_ONLY` 模式未实现，不进入矩阵。
 - `TUGMCP_USE_SYSTEM_DEPS=ON` 至少 1 个 job。
 - conformance（外部 runner）、`tls`/`slow`/`win-only`、sanitizers（GCC/Clang ASAN+UBSAN；Linux TSAN）、perf/soak。
 - 夜线失败必须可定位到 job/构建组合；不得用一个 job 代表全部组合。
@@ -554,7 +554,7 @@ python tests/conformance/run_external.py \
 | 验收项 | 验证方式（target + 命令 + 期望） |
 |---|---|
 | 双 TU 无重复符号 | `tugmcp_odr_tests`；`ctest --test-dir build -R unit.odr_link --output-on-failure`；退出码 0，无 duplicate symbol |
-| header-only/编译模式同测试集一致 | 分别以 `TUGMCP_HEADER_ONLY=ON/OFF` 构建；`ctest --test-dir build -L "unit|integration" -LE "slow|tls|win-only"`；两次全绿且用例数一致（`ctest -N` 对比） |
+| 编译库/单头 artifact 同测试集一致 | 编译库构建与 `tests/amalgamation` 的 standalone consumer/ODR 构建分别验证；`ctest --test-dir build -L "unit|integration" -LE "slow|tls|win-only"` 与 `ctest -L amalgamation`；两次全绿。split-header `TUGMCP_HEADER_ONLY` 模式未实现 |
 | TLS reason 矩阵 | `tugmcp_tls_tests`；`ctest --test-dir build -L tls --output-on-failure`；5 行 reason 各自命中预期观测点。TLS-off 的 `tls_not_built`/`unsupported_scheme` 用 `CountingListener` bind loopback 端口：断言 **accept 次数 = 0** 且 **listen 队列为空/无 pending 连接**（仅 accept=0 不足以排除内核已完成握手），证明未发生连接尝试 |
 | 宏守卫负例 | configure 阶段 `try_compile`；正/负例均 `LINK_LIBRARIES tugmcp::http tugmcp::core`；正例（`TUGMCP_TLS_ENABLED=1` + `CPPHTTPLIB_OPENSSL_SUPPORT`）通过，负例（`TUGMCP_TLS_ENABLED=0` + `CPPHTTPLIB_OPENSSL_SUPPORT`）失败且 `OUTPUT_VARIABLE` 含 `TUGMCP_TLS_ENABLED`（排除缺 include） |
 | conformance 真实接线 | 以 `TUGMCP_CONFORMANCE=ON` 配置；`ctest --test-dir build -L conformance --output-on-failure`；必须执行 `tests/conformance/run_external.py`，退出码 0 且 `expected_cases.json` 清单齐全（版本 `0.2.0-alpha.12`） |

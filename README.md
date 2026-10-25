@@ -27,6 +27,7 @@
 tugmcp/
   AGENTS.md
   README.md
+  LICENSE              # 项目许可证（MIT）
   designs/             # 设计文档（含 testing.md 测试设计）
   include/tugmcp/
     core.hpp
@@ -98,6 +99,10 @@ cmake --build build --target amalgamate-release  # 生成并打包 build/amalgam
 TLS 默认关闭；开启后需 OpenSSL ≥ 3.0（cpp-httplib 要求）与 `crypt32`（Windows），且同一进程只能有一套 OpenSSL。
 
 依赖来源是**显式二选一**：默认用 `3rd/`；`TUGMCP_USE_SYSTEM_DEPS=ON` 时完全改用系统包，找不到即 configure 失败，不会自动回退 vendored。
+
+## 许可证
+
+本项目采用 **MIT License**，全文见根 [`LICENSE`](./LICENSE)。单头发布目录同时携带该 `LICENSE` 与第三方依赖的 MIT 许可证文本（`LICENSES/`）。
 
 ## 文档权威
 

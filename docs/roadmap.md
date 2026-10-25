@@ -14,7 +14,7 @@
 | **M4** 2025 client/replay | **已完成（Gate 3）** | session、GET 流/replay、请求处理、cancel；2026 fallback |
 | **M5** 宿主适配 | **已完成（Gate 4）** | `IExecutor`（默认内部池）+ `IAuthenticator`/`IAuthorizer`/`IApprovalHook`/`IAuditHook`（D20）；401/403、审批超时/取消、审计异常收敛 |
 | **M6** legacy HTTP+SSE | **已完成（Gate 4）** | `TUGMCP_ENABLE_LEGACY_SSE`（默认 OFF）；server+client、endpoint/messages、batch 仅 legacy、auth/Host-Origin/上限 |
-| **Amalgamation / release artifact** | **已完成（H3）** | `tugmcp.hpp` / `tugmcp_http.hpp` / `tugmcp_http_tls.hpp`；记录哈希、`SHA256SUMS`、`NOTICE`、`LICENSES/`；`amalgamate` / `amalgamate-release` target；双 TU/ODR、Inspector 2.12 与官方 conformance 外部验证 |
+| **Amalgamation / release artifact** | **已完成（H3）** | `tugmcp.hpp` / `tugmcp_http.hpp` / `tugmcp_http_tls.hpp`；MIT `LICENSE`、记录哈希、`SHA256SUMS`、`NOTICE`、`LICENSES/`；`amalgamate` / `amalgamate-release` target；双 TU/ODR、Inspector 2.12 与官方 conformance 外部验证 |
 
 ## 2. 最终验证（2026-10-25）
 

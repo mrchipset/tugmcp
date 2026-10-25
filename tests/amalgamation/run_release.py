@@ -4,8 +4,10 @@
 Checks:
   * the three release headers and their recorded SHA256 values;
   * SHA256SUMS is complete and every listed file matches;
-  * bundled third-party licenses, NOTICE and README are present;
-  * README/NOTICE record the project version and dependency versions;
+  * the project LICENSE (MIT), bundled third-party licenses, NOTICE and README
+    are present and match the source tree;
+  * README/NOTICE record the project version (derived from CMakeLists.txt) and
+    dependency versions (cpp-httplib derived from httplib.h);
   * guards, TUGMCP_IMPLEMENTATION guidance and link requirements are present;
   * re-running the packager produces byte-identical output (no timestamps).
 
@@ -30,6 +32,10 @@ from process_util import run_bounded  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGER = ROOT / "tools" / "package_amalgamation.py"
 RECORDED = ROOT / "tests" / "amalgamation"
+PROJECT_LICENSE = ROOT / "LICENSE"
+CMAKELISTS = ROOT / "CMakeLists.txt"
+HTTPLIB_HEADER = ROOT / "3rd" / "cpp-httplib" / "httplib.h"
+EXPECTED_HTTPLIB_VERSION = "0.63.0"
 
 HEADERS = (
     ("tugmcp.hpp", "TUGMCP_SINGLE_HEADER_CORE_HPP", "core.sha256"),
@@ -53,6 +59,30 @@ def recorded_hash(name: str) -> str:
     if not tokens:
         raise ReleaseError(f"empty recorded hash file: {name}")
     return tokens[0].lower()
+
+
+def project_version() -> str:
+    text = CMAKELISTS.read_text(encoding="utf-8")
+    match = re.search(
+        r"project\s*\(\s*tugmcp\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)",
+        text,
+    )
+    if not match:
+        raise ReleaseError("project version not found in CMakeLists.txt")
+    return match.group(1)
+
+
+def httplib_version() -> str:
+    text = HTTPLIB_HEADER.read_text(encoding="utf-8")
+    match = re.search(r'#define\s+CPPHTTPLIB_VERSION\s+"([^"]+)"', text)
+    if not match:
+        raise ReleaseError("CPPHTTPLIB_VERSION not found in httplib.h")
+    if match.group(1) != EXPECTED_HTTPLIB_VERSION:
+        raise ReleaseError(
+            f"cpp-httplib version {match.group(1)} != packaged "
+            f"{EXPECTED_HTTPLIB_VERSION}"
+        )
+    return match.group(1)
 
 
 def run(command: List[str], timeout: int = 300) -> None:
@@ -96,7 +126,8 @@ def parse_sums(release_dir: Path) -> Dict[str, str]:
 
 def verify_required_files(release_dir: Path) -> Dict[str, str]:
     sums = parse_sums(release_dir)
-    required = [name for name, _guard, _hash in HEADERS]
+    required = ["LICENSE"]
+    required += [name for name, _guard, _hash in HEADERS]
     required += [f"LICENSES/{name}" for name in LICENSES]
     for name in required:
         path = release_dir / name
@@ -110,6 +141,9 @@ def verify_required_files(release_dir: Path) -> Dict[str, str]:
                 f"SHA256SUMS mismatch for {name}: "
                 f"recorded {sums[name]}, actual {actual}"
             )
+    packaged_license = (release_dir / "LICENSE").read_bytes()
+    if packaged_license != PROJECT_LICENSE.read_bytes():
+        raise ReleaseError("packaged LICENSE differs from the root LICENSE")
     for extra in ("NOTICE", "README.md"):
         if not (release_dir / extra).is_file():
             raise ReleaseError(f"required release file is missing: {extra}")
@@ -137,9 +171,22 @@ def verify_metadata(release_dir: Path) -> None:
     notice = (release_dir / "NOTICE").read_text(encoding="utf-8")
     combined = readme + "\n" + notice
 
-    for token in ("0.1.0", "3.12.0", "0.63.0"):
+    for token in (
+        project_version(),
+        "3.12.0",
+        httplib_version(),
+    ):
         if token not in combined:
             raise ReleaseError(f"release metadata is missing version {token}")
+
+    if "See the project repository" in combined:
+        raise ReleaseError(
+            "release metadata must point at the bundled LICENSE, not the "
+            "project repository"
+        )
+    for token in ("LICENSE", "MIT License"):
+        if token not in combined:
+            raise ReleaseError(f"release metadata is missing {token!r}")
 
     readme_tokens = (
         "TUGMCP_SINGLE_HEADER_CORE_HPP",
@@ -159,6 +206,8 @@ def verify_metadata(release_dir: Path) -> None:
         "excluded",
         "package_amalgamation.py",
         "amalgamate-release",
+        "sha256sum -c SHA256SUMS",
+        "openssl dgst",
     )
     for token in readme_tokens:
         if token not in readme:

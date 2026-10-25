@@ -54,12 +54,14 @@ This script generates and packages all three artifacts into
 `build/amalgamation/release` through `tools/package_amalgamation.py`, then
 verifies:
 
-1. all three headers, `SHA256SUMS`, `NOTICE`, `README.md` and
+1. all three headers, `LICENSE` (MIT, byte-equal to the root license),
+   `SHA256SUMS`, `NOTICE`, `README.md` and
    `LICENSES/{nlohmann-json-MIT.txt,cpp-httplib-MIT.txt}` exist;
-2. every `SHA256SUMS` entry matches and the headers match the recorded
-   `core.sha256`/`http.sha256`/`http_tls.sha256` values;
+2. every `SHA256SUMS` entry matches (including `LICENSE`) and the headers match
+   the recorded `core.sha256`/`http.sha256`/`http_tls.sha256` values;
 3. guards, `TUGMCP_IMPLEMENTATION`, link requirements and dependency versions
-   (`0.1.0`, `3.12.0`, `0.63.0`) are recorded;
+   (project version from `CMakeLists.txt`, `3.12.0`, cpp-httplib version from
+   `httplib.h`) are recorded;
 4. a second packaging run is byte-identical (no timestamps).
 
 It is registered as the `amalgamation.release` ctest test (label `amalgamation`,

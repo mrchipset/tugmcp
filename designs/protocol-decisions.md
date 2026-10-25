@@ -16,7 +16,7 @@
 | D6 | HTTP/SSE 用 cpp-httplib，固定 commit + SHA256 | 已定 |
 | D7 | Schema 校验可插拔；2020-12 用 jsoncons，draft-07 用 Valijson | 已定 |
 | D8 | Canonical JSON 用 RFC 8785 JCS 或文档化稳定子集 | 已定 |
-| D9 | 默认构建产物为静态库；header-only 为显式 opt-in（`TUGMCP_HEADER_ONLY=ON`）；单头文件只作为生成的 amalgamation | 已定 |
+| D9 | 默认构建产物为静态库；发布由脚本生成的单头 artifact（`tugmcp.hpp`/`tugmcp_http.hpp`/`tugmcp_http_tls.hpp`）；split-header `TUGMCP_HEADER_ONLY` INTERFACE 模式未实现（FATAL） | 已定 |
 | D10 | 库不拥有设备安全/任务/业务；auth/approval/audit/safety 由应用提供 | 已定 |
 | D11 | C++17、无 GUI 依赖 core、CMake-only、静态库优先、`mcp::v1` | 已定 |
 | D12 | 协议验收用 conformance 0.2.0-alpha.12（先验证 2026 覆盖）+ 自定义 vectors | 已定 |
@@ -113,16 +113,17 @@
 
 ## D9 — Header-only 策略
 
-**背景**：目标是易嵌入、可复用；header-only 可消除库 ABI，但增加编译时间/暴露实现。默认静态库可保证编译隔离与稳定构建，header-only 作为显式可选项。
+**背景**：目标是易嵌入、可复用；header-only 可消除库 ABI，但增加编译时间/暴露实现。默认静态库可保证编译隔离与稳定构建。
 
-**决策**：**默认构建产物为静态库；同时支持以 header-only 方式消费（`TUGMCP_HEADER_ONLY=ON` 显式开启）**；核心/协议/stdio 可在 header-only 模式下使用；`transport/http.hpp` 仅声明（不 include cpp-httplib），header-only 实现位于 `detail/http_httplib.hpp`；单头文件 `tugmcp.hpp` 只作为生成的 amalgamation。
+**决策**：**默认构建产物为静态库；发布形态是 `tools/amalgamate.py` 生成的单头 artifact（`tugmcp.hpp`/`tugmcp_http.hpp`/`tugmcp_http_tls.hpp`）。** `transport/http.hpp` 仅声明（不 include cpp-httplib），单头实现由 `detail/http_httplib.hpp` 合并；split-header `TUGMCP_HEADER_ONLY=ON` 的 CMake INTERFACE 模式**未实现**，根 `CMakeLists.txt` 直接 `FATAL_ERROR`。
 
 **后果**：
-- `TUGMCP_HEADER_ONLY=ON` 只切换**库** target（`core`/`http`/`schema_*`）为 INTERFACE（不编译 `src/`）。
-- `tugmcp::tests` 是 **INTERFACE helper 库**（fake transport / conformance helpers / fixture 头，INTERFACE 传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）为独立 target，**始终编译**，不受 `TUGMCP_HEADER_ONLY` 影响。
-- 需要 ODR/双 TU 测试、inline/constexpr 规范、Windows 链接标志。
+- 单头 artifact 由 `amalgamate` / `amalgamate-release` 生成与打包；消费方在一个 TU 定义 `TUGMCP_IMPLEMENTATION`。
+- `TUGMCP_HEADER_ONLY=ON` **不会**切换库 target；它是未实现的 split-header 模式，ON 即 configure 失败。单头 artifact 不读取该开关。
+- `tugmcp::tests` 是 **INTERFACE helper 库**（fake transport / conformance helpers / fixture 头，INTERFACE 传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）为独立 target，**始终编译**。
+- 需要 ODR/双 TU 测试、inline/constexpr 规范、Windows 链接标志；单头外部验证见 `docs/amalgamation.md`。
 - 编译时间/二进制大小需测量；不能盲目单头化。
-- 详见 `header-only.md`。
+- 详见 `header-only.md` 与 `docs/amalgamation.md`。
 
 ## D10 — 安全边界
 
@@ -166,7 +167,7 @@
 - 删除 GUI 工具链相关构建约束与测试框架依赖。
 
 **后果**：
-- CI 矩阵变为 3 编译器 × TLS on/off × header-only/编译模式。
+- CI 矩阵变为 3 编译器 × TLS on/off × 单头 artifact/编译模式。
 - 消费者只需 C++17 编译器与 CMake ≥3.20，不引入 GUI 工具链依赖。
 
 ## D14 — TLS 可选编译
@@ -175,9 +176,9 @@
 
 **决策**：
 - 项目级开关 `TUGMCP_TLS`（默认 OFF）+ `TUGMCP_TLS_BACKEND=openssl`。v1 仅支持 `openssl`；其它值在 configure 阶段直接失败。
-- `TlsOptions` 字段无条件存在于公共 options；`transport/http.hpp` 永不 include cpp-httplib；header-only 实现仅在 `detail/http_httplib.hpp`。
-- 宏作用域：编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 **PRIVATE**（只作用于 `src/transport/*.cpp`），OpenSSL 为 PRIVATE（静态库经 `$<LINK_ONLY:>` 传给最终链接）；**header-only 模式才 INTERFACE**。禁止全局 `add_definitions`。
-- `detail/http_httplib.hpp` 用 `#error` 守卫抓宏漂移（`#ifndef TUGMCP_TLS_ENABLED` 即失败，并校验 `TUGMCP_TLS_ENABLED` 与 `CPPHTTPLIB_SSL_ENABLED` 一致）。编译模式下 `src/transport/*.cpp` 直接 include `httplib.h`（不使用 detail 头），detail 头为 header-only 专用。header-only 下无法在链接期检测跨 TU 不一致，因此只支持经 `tugmcp::http` target 消费。
+- `TlsOptions` 字段无条件存在于公共 options；`transport/http.hpp` 永不 include cpp-httplib；单头实现仅在 `detail/http_httplib.hpp`。
+- 宏作用域：编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 **PRIVATE**（只作用于 `src/transport/*.cpp`），OpenSSL 为 PRIVATE（静态库经 `$<LINK_ONLY:>` 传给最终链接）；单头 TLS artifact 在实现段、`<httplib.h>` 前发出这两个宏；split-header `TUGMCP_HEADER_ONLY=ON` 的 INTERFACE 模式未实现（FATAL）。禁止全局 `add_definitions`。
+- `detail/http_httplib.hpp` 用 `#error` 守卫抓宏漂移（`#ifndef TUGMCP_TLS_ENABLED` 即失败，并校验 `TUGMCP_TLS_ENABLED` 与 `CPPHTTPLIB_SSL_ENABLED` 一致）。编译模式下 `src/transport/*.cpp` 直接 include `httplib.h`（不使用 detail 头），detail 头供单头生成使用。单头 artifact 无法在链接期检测跨 TU 不一致，因此每个看到 `httplib.h` 的 TU 必须使用同一 artifact/宏。
 - 无 TLS 时客户端使用 `https://`：创建期失败，返回 `McpError`（`-32603`，`data.reason="unsupported_scheme"`），不进入 JSON-RPC 响应，也不发网络包。
 - `certChainPath`/`privateKeyPath` 在 client 侧用于 mTLS（字段名相同，语义随角色）；`serverName`/`verifyPeer`/`caBundlePath` 为 client-only。
 - OpenSSL 版本 ≥3.0；同一进程只允许一套 OpenSSL。

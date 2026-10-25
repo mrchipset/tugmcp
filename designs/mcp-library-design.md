@@ -85,7 +85,7 @@
 | 双协议 | 2026-07-28 主，2025-11-25 回退；同一 handler 可复用 |
 | stdio + HTTP | 本地进程与网络两种部署；可替换 transport |
 | 可测试 | Fake transport、loopback、conformance suite |
-| 可打包 | CMake targets、3rd 依赖、可选依赖；默认构建产物为静态库，`TUGMCP_HEADER_ONLY=ON` 时改 INTERFACE |
+| 可打包 | CMake targets、3rd 依赖、可选依赖；默认构建产物为静态库；发布由脚本生成的单头 artifact；split-header `TUGMCP_HEADER_ONLY` 模式未实现 |
 | 可演进 | 协议常量/适配器隔离；pimpl/ABI 策略 |
 
 ### 2.2 非目标
@@ -246,7 +246,7 @@ include/tugmcp/
   transport/stdio.hpp    // 无第三方依赖
   transport/http.hpp     // 仅声明 TlsOptions / StreamableHttp* / 工厂；不含 cpp-httplib
   transport/legacy_sse.hpp // 可选 legacy HTTP+SSE（TUGMCP_ENABLE_LEGACY_SSE=ON）
-  detail/http_httplib.hpp // header-only 模式唯一 include cpp-httplib 的实现头
+  detail/http_httplib.hpp // 单头实现唯一 include cpp-httplib 的实现头
   protocol/v2026.hpp
   protocol/v2025.hpp
   schema/{jsoncons,valijson,null}.hpp // 各自仅在对应可选 target 中 include 第三方
@@ -276,12 +276,12 @@ LICENSES/                // 聚合许可证（REUSE 风格）
 | target | 内容 | 依赖 | link deps / 作用域 |
 |---|---|---|---|
 | `tugmcp::core` | 类型、dispatcher、registry、stdio、协议适配、canonical JSON | nlohmann/json（3rd/nlohmann_json） | `Threads::Threads` PUBLIC；**INTERFACE include `tugmcp_3rd_json`**（公共头暴露 `Json`）；`find_dependency(Threads)`/`find_dependency(nlohmann_json)` 仅未来启用 install 时 |
-| `tugmcp::http` | Streamable HTTP server/client、SSE parser、legacy adapter | `tugmcp::core`、cpp-httplib | `tugmcp::core`；`tugmcp_3rd_httplib` 编译模式 PRIVATE、header-only 模式 INTERFACE；Windows `ws2_32`（TLS 时 `crypt32`）；TLS 时 `OpenSSL::SSL`+`OpenSSL::Crypto`（编译模式 PRIVATE/`LINK_ONLY`，header-only 模式 INTERFACE）；`find_dependency(OpenSSL)` 仅未来启用 install 时 |
+| `tugmcp::http` | Streamable HTTP server/client、SSE parser、legacy adapter | `tugmcp::core`、cpp-httplib | `tugmcp::core`；`tugmcp_3rd_httplib` 编译模式 PRIVATE（单头消费方提供外部头）；Windows `ws2_32`（TLS 时 `crypt32`）；TLS 时 `OpenSSL::SSL`+`OpenSSL::Crypto`（编译模式 PRIVATE/`LINK_ONLY`）；`find_dependency(OpenSSL)` 仅未来启用 install 时 |
 | `tugmcp::schema_jsoncons` | 2020-12 校验 | `tugmcp::core`、jsoncons（可选） | `tugmcp::core` + 对应 3rd target **INTERFACE include**；宏 PRIVATE |
 | `tugmcp::schema_valijson` | draft-07 校验 | `tugmcp::core`、Valijson（可选） | `tugmcp::core` + 对应 3rd target **INTERFACE include**；宏 PRIVATE |
 | `tugmcp::tests` | **INTERFACE helper 库**：fake transport / conformance helpers / fixture 头 | doctest（单头；测试设计见 [`testing.md`](./testing.md)） | **INTERFACE 传播 `tugmcp_3rd_doctest`** |
 
-v1 只保证静态库；`TUGMCP_HEADER_ONLY=ON` 时**库** target（core/http/schema_*）改为 INTERFACE（不编译 `src/`）。`tugmcp::core` 不链接 GUI 框架/cpp-httplib。
+v1 只保证静态库；单头消费使用生成的 release artifact（`tugmcp.hpp`/`tugmcp_http.hpp`/`tugmcp_http_tls.hpp`）。split-header `TUGMCP_HEADER_ONLY=ON` 的 INTERFACE 模式未实现（FATAL）。`tugmcp::core` 不链接 GUI 框架/cpp-httplib。
 
 ---
 
@@ -649,7 +649,7 @@ public:
 
 **配置所有权：** `ServerOptions` 拥有 schema/auth/authorizer/audit/approval/executor、`instructions`、`enableLegacySse`；`StreamableHttpServerOptions` 只保留传输参数（bind/port/body/stream limits/admission/emergency path），**TLS 归传输 options**（`TlsOptions tls`）；`ClientOptions` 拥有客户端 auth 与 `prefer`。不要在两处重复注入同一个对象。
 
-**TLS 宏作用域与守卫：** `CPPHTTPLIB_OPENSSL_SUPPORT` + `TUGMCP_TLS_ENABLED`(0/1) 在编译模式下为 **PRIVATE**（只作用于 `src/transport/*.cpp`，`OpenSSL::*` 亦为 PRIVATE，经 `$<LINK_ONLY:>` 传给最终链接）；**header-only 模式才为 INTERFACE**。`detail/http_httplib.hpp` 使用三条 `#error` 守卫，抓 CMake/宏漂移：
+**TLS 宏作用域与守卫：** `CPPHTTPLIB_OPENSSL_SUPPORT` + `TUGMCP_TLS_ENABLED`(0/1) 在编译模式下为 **PRIVATE**（只作用于 `src/transport/*.cpp`，`OpenSSL::*` 亦为 PRIVATE，经 `$<LINK_ONLY:>` 传给最终链接）；单头 TLS artifact 在实现段依赖自身发出的宏；split-header `TUGMCP_HEADER_ONLY=ON` 的 INTERFACE 模式未实现。`detail/http_httplib.hpp` 使用三条 `#error` 守卫，抓 CMake/宏漂移：
 
 ```cpp
 #ifndef TUGMCP_TLS_ENABLED
@@ -665,7 +665,7 @@ public:
 
 **所有 TU 一律经 `detail/http_httplib.hpp` 单一入口 include httplib**（编译模式也如此）：该头按 `TUGMCP_TLS_ENABLED` 定义 `CPPHTTPLIB_OPENSSL_SUPPORT`，再 include `httplib.h`，最后用 `CPPHTTPLIB_SSL_ENABLED` 做一致性检查。任何 TU 直接 include `httplib.h` 都可能以不同宏实例化 httplib 的 inline 代码，链接期 COMDAT 折叠会选中错误的定义（曾导致 https 客户端抛 `'https' scheme is not supported`）。`detail/http_httplib.hpp` 因此不属于公共 API，只供 `tugmcp::http` 的消费者使用。
 
-**诚实边界：** header-only 模式**无法在链接期检测跨 TU 宏不一致**，因此只支持经 `tugmcp::http` CMake target 消费；不得声称运行期可检测。
+**诚实边界：** 单头 artifact **无法在链接期检测跨 TU 宏不一致**，因此每个看到 `httplib.h` 的 TU 必须使用同一 artifact/宏；不得声称运行期可检测。split-header `TUGMCP_HEADER_ONLY` 模式未实现。
 
 | 项 | 设计 |
 |---|---|
@@ -1186,7 +1186,7 @@ public:
 - TLS 默认关闭；开启后链接 `OpenSSL::SSL`/`OpenSSL::Crypto`，Windows 追加 `crypt32`。
 - 同一进程只允许一套 OpenSSL 3.x；宿主若已静态链接其他版本，优先外部 TLS 终止，或改用 mbedTLS/wolfSSL 后端（后端预留接口，首版只实现 openssl）。
 - 默认 loopback 明文；远程部署由外部反向代理终止 TLS；库不内置证书管理。
-- **TLS 开/关不改变公共 ABI 的前提：** `transport/http.hpp` 不随 TLS/构建模式变化且 `TlsOptions` 字段**无条件存在**；公共头**只允许** include `nlohmann/json`（`Json` 暴露）与对应可选 schema target 的第三方头；`core/server/client/transport/http.hpp` 永不 include cpp-httplib（`httplib.h` 只出现在 `detail/http_httplib.hpp` 与编译模式的 `src/transport/*.cpp`）。编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 PRIVATE；header-only 模式下必须在所有 TU 一致，且库无法在链接期检测跨 TU 不一致（只支持经 `tugmcp::http` target 消费）。
+- **TLS 开/关不改变公共 ABI 的前提：** `transport/http.hpp` 不随 TLS/构建模式变化且 `TlsOptions` 字段**无条件存在**；公共头**只允许** include `nlohmann/json`（`Json` 暴露）与对应可选 schema target 的第三方头；`core/server/client/transport/http.hpp` 永不 include cpp-httplib（`httplib.h` 只出现在 `detail/http_httplib.hpp` 与编译模式的 `src/transport/*.cpp`）。编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 PRIVATE；单头 artifact 下所有看到 `httplib.h` 的 TU 必须使用同一 artifact/宏，库无法在链接期检测跨 TU 不一致；split-header `TUGMCP_HEADER_ONLY` 模式未实现。
 
 ### 18.2 安全默认
 
@@ -1231,7 +1231,7 @@ public:
 | Failure | 断连、超时、取消、队列满、慢客户端、非法 JSON |
 | Schema | 2020-12（jsoncons）、draft-07（Valijson）、无 validator（fail closed） |
 | Toolchain | MSVC x64、GCC、Clang |
-| Build mode | 静态库、`TUGMCP_HEADER_ONLY=ON` |
+| Build mode | 静态库、单头发布 artifact（split-header `TUGMCP_HEADER_ONLY` 未实现） |
 | TLS | on、off |
 
 失败用例必须可定位到「层 + 维度」；conformance 失败不得跳过。
@@ -1254,7 +1254,7 @@ option(TUGMCP_USE_SYSTEM_DEPS "Use system-installed dependencies" OFF)
 option(TUGMCP_VERIFY_3RD_HASHES "Verify 3rd/ file hashes at configure time" ON)
 option(TUGMCP_ENABLE_LEGACY_SSE "Build legacy HTTP+SSE adapter" OFF)
 option(TUGMCP_BUILD_TESTS    "Build tests" ON)
-option(TUGMCP_HEADER_ONLY    "Consume as header-only INTERFACE targets" OFF)
+option(TUGMCP_HEADER_ONLY    "Split-header INTERFACE mode (not implemented; FATAL)" OFF)
 option(TUGMCP_BUILD_EXAMPLES "Build examples" ON)
 option(TUGMCP_CONFORMANCE    "Run external MCP conformance suite" OFF)
 ```
@@ -1267,8 +1267,8 @@ endif()
 if(TUGMCP_ENABLE_LEGACY_SSE AND NOT TUGMCP_WITH_HTTP)
   message(FATAL_ERROR "TUGMCP_ENABLE_LEGACY_SSE=ON requires TUGMCP_WITH_HTTP=ON")
 endif()
-if(TUGMCP_HEADER_ONLY AND TUGMCP_ENABLE_LEGACY_SSE)
-  message(FATAL_ERROR "TUGMCP_ENABLE_LEGACY_SSE=ON requires src/ and cannot be used with TUGMCP_HEADER_ONLY=ON")
+if(TUGMCP_HEADER_ONLY)
+  message(FATAL_ERROR "TUGMCP_HEADER_ONLY is not implemented; use the single-header release artifact instead")
 endif()
 if(TUGMCP_TLS)
   find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
@@ -1303,14 +1303,14 @@ endif()
 | target | 说明 | link deps / 作用域 |
 |---|---|---|
 | `tugmcp::core` | 无 GUI/HTTP；默认 STATIC | `Threads::Threads` PUBLIC；**INTERFACE include `tugmcp_3rd_json`**（公共头暴露 `Json`）；`find_dependency(...)` 仅未来启用 install 时 |
-| `tugmcp::http` | cpp-httplib + SSE parser | `tugmcp::core`；`tugmcp_3rd_httplib` 编译模式 PRIVATE、header-only 模式 INTERFACE；Windows `ws2_32`（TLS 时 `crypt32`）；TLS 时 `OpenSSL::SSL`+`OpenSSL::Crypto`（编译模式 PRIVATE/`LINK_ONLY`，header-only 模式 INTERFACE）；`find_dependency(...)` 仅未来启用 install 时 |
+| `tugmcp::http` | cpp-httplib + SSE parser | `tugmcp::core`；`tugmcp_3rd_httplib` 编译模式 PRIVATE（单头消费方提供外部头）；Windows `ws2_32`（TLS 时 `crypt32`）；TLS 时 `OpenSSL::SSL`+`OpenSSL::Crypto`（编译模式 PRIVATE/`LINK_ONLY`）；`find_dependency(...)` 仅未来启用 install 时 |
 | `tugmcp::schema_jsoncons` | 可选 2020-12 | `tugmcp::core` + 对应 3rd target **INTERFACE include**；宏 PRIVATE |
 | `tugmcp::schema_valijson` | 可选 draft-07 | 同上 |
 | `tugmcp::tests` | **INTERFACE helper 库**：fake transport / conformance helpers / fixture 头；测试设计见 [`testing.md`](./testing.md) | **INTERFACE 传播 `tugmcp_3rd_doctest`** |
 
-v1 只保证静态库；`TUGMCP_HEADER_ONLY=ON` 只切换**库** target（core/http/schema_*）为 INTERFACE（不编译 `src/`）。
+v1 只保证静态库；单头消费使用生成的 release artifact。split-header `TUGMCP_HEADER_ONLY=ON` 的 INTERFACE 模式未实现（FATAL）。
 
-测试可执行文件是独立 target（`tugmcp_unit_tests`、`tugmcp_integration_tests`、`tugmcp_tls_tests`、`tugmcp_slow_tests`、`tugmcp_executor_tests`、`tugmcp_odr_tests`、`tugmcp_schema_tests`、`tugmcp_win_stdio_tests`、`tugmcp_conformance_tests`），**始终编译**（源码为 `tests/**/*.cpp`），**不受** `TUGMCP_HEADER_ONLY` 影响；完整定义见 [`testing.md`](./testing.md) §4.2。
+测试可执行文件是独立 target（`tugmcp_unit_tests`、`tugmcp_integration_tests`、`tugmcp_tls_tests`、`tugmcp_slow_tests`、`tugmcp_executor_tests`、`tugmcp_odr_tests`、`tugmcp_schema_tests`、`tugmcp_win_stdio_tests`、`tugmcp_conformance_tests`），**始终编译**（源码为 `tests/**/*.cpp`）。split-header `TUGMCP_HEADER_ONLY` 模式未实现，因此不存在“只切换库 target”的测试分支；完整定义见 [`testing.md`](./testing.md) §4.2。
 
 `tugmcp_echo_server` 为 example 可执行 target（`examples/echo_server/`，受 `TUGMCP_BUILD_EXAMPLES` 控制，默认 ON）；`tests` 侧 conformance 依赖它。该检查必须在 `add_subdirectory(examples)` **之后**执行（examples 先于 tests）：
 
@@ -1389,7 +1389,7 @@ system 模式忽略 `TUGMCP_VERIFY_3RD_HASHES`。
 | Valijson | v1.1.3 | 单头 | BSD-2 | C++17，自带 `fast_float` |
 | doctest | v2.5.3 | 单头 | MIT | 测试专用 |
 
-TLS 相关：`CPPHTTPLIB_OPENSSL_SUPPORT` 必须在 include `httplib.h` 前定义，且只由 `tugmcp::http` 传播（编译模式 PRIVATE，header-only 模式 INTERFACE；禁止全局 `add_definitions`）；`CPPHTTPLIB_SSL_ENABLED` 是头内自动推导的聚合宏，不得手写。链接需求为 `Threads::Threads`、`OpenSSL::SSL` + `OpenSSL::Crypto`，Windows 追加 `ws2_32`、`crypt32`。
+TLS 相关：`CPPHTTPLIB_OPENSSL_SUPPORT` 必须在 include `httplib.h` 前定义，且只由 `tugmcp::http`（编译模式 PRIVATE）或单头 TLS artifact 的实现段 prelude 传播（split-header INTERFACE 模式未实现；禁止全局 `add_definitions`）；`CPPHTTPLIB_SSL_ENABLED` 是头内自动推导的聚合宏，不得手写。链接需求为 `Threads::Threads`、`OpenSSL::SSL` + `OpenSSL::Crypto`，Windows 追加 `ws2_32`、`crypt32`。
 
 ### 20.3 ABI/版本
 
@@ -1397,7 +1397,7 @@ TLS 相关：`CPPHTTPLIB_OPENSSL_SUPPORT` 必须在 include `httplib.h` 前定�
 |---|---|
 | C++ 标准 | C++17；不使用 C++20 特性 |
 | 公共头 | 稳定值类型 + pimpl；不暴露实现容器 |
-| 导出宏 | Windows 使用 `TUGMCP_API`（为未来共享库预留，v1 静态构建不需要）；header-only 由 `TUGMCP_HEADER_ONLY`/`TUGMCP_IMPLEMENTATION` 控制 |
+| 导出宏 | Windows 使用 `TUGMCP_API`（为未来共享库预留，v1 静态构建不需要）；单头 artifact 由 `TUGMCP_IMPLEMENTATION` 控制；split-header `TUGMCP_HEADER_ONLY` 模式未实现 |
 | nlohmann 暴露 | `Json` 在公共签名中出现；固定/兼容版本，接受 ABI 约束 |
 | 语义版本 | `MAJOR.MINOR.PATCH`；协议常量单独版本化 |
 | 协议常量 | `protocol/versions.hpp`；2026/2025 字符串集中 |

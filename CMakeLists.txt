@@ -57,24 +57,24 @@ set(TUGMCP_AMALGAMATION_RELEASE_DIR
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_custom_target(amalgamate
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py"
       --profile core
-      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp.hpp
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+      --out "${CMAKE_BINARY_DIR}/amalgamation/tugmcp.hpp"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py"
       --profile http
-      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http.hpp
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+      --out "${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http.hpp"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py"
       --profile http --tls
-      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http_tls.hpp
+      --out "${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http_tls.hpp"
     COMMENT "Generating core/HTTP/TLS single-header artifacts"
     VERBATIM)
   add_custom_target(amalgamate-release
-    COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tools/package_amalgamation.py
-      --release-dir ${TUGMCP_AMALGAMATION_RELEASE_DIR}
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/package_amalgamation.py"
+      --release-dir "${TUGMCP_AMALGAMATION_RELEASE_DIR}"
     COMMENT "Packaging single-header release artifacts"
     VERBATIM)
 endif()

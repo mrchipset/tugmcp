@@ -14,6 +14,7 @@ is skipped entirely when `TUGMCP_USE_SYSTEM_DEPS=ON`.
 | nlohmann/json | 3.12.0 | `v3.12.0` | `55f93686c01528224f448c19128836e7df245f72` | MIT | https://github.com/nlohmann/json |
 | jsoncons | 1.10.0 | `v1.10.0` | `9e57e421285422d7aeeb5aa7dc839f6a19121ee6` | BSL-1.0 | https://github.com/danielaparker/jsoncons |
 | Valijson | 1.1.3 | `v1.1.3` | `5eac4b66f20b2c189ae40281c29e71cf39a958ec` | BSD-2-Clause | https://github.com/tristanpenman/valijson |
+| cpp-httplib | 0.63.0 | `v0.63.0` | not recorded (use vendored file SHA256) | MIT | https://github.com/yhirose/cpp-httplib |
 
 ## Vendored files and SHA256
 
@@ -24,6 +25,8 @@ is skipped entirely when `TUGMCP_USE_SYSTEM_DEPS=ON`.
 | `3rd/doctest/scripts/cmake/doctestAddTests.cmake` | `3ec2839f12b7a12b0d7ef6244b60eecae40ad797caa3f016fc09875956a518dc` |
 | `3rd/nlohmann_json/nlohmann/json.hpp` | `aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63` |
 | `3rd/nlohmann_json/nlohmann/json_fwd.hpp` | `fb6aa70cbece087f37ab4685c182b287c53be54f785f981b9db9d30d2d028b37` |
+| `3rd/cpp-httplib/httplib.h` | `9021001a719768893a8a6e4051c56107690e8b8e49b41e5f903534fa19ae9afb` |
+| `LICENSES/cpp-httplib-MIT.txt` | `4b45cbe16d7b71b89ae6127e26e0d90a029198ca5e958ad8e3d0b8bbed364d8b` |
 | `LICENSES/doctest-MIT.txt` | `0fe0b331fa1513dcce8604ff1fa925f32d1cea17d8aeb1c2471fad40d291adc5` |
 | `LICENSES/nlohmann-json-MIT.txt` | `46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603` |
 | `LICENSES/jsoncons-BSL-1.0.txt` | `97550c71a0bdfc20bf85c6c5167d7b7785f9bd3448baee048fbedf742ed52270` |
@@ -49,6 +52,7 @@ notes (Valijson's `fast_float` submodule is intentionally not vendored).
 include directories so third-party warnings do not pollute our builds:
 
 - `tugmcp_3rd_json` — nlohmann/json
+- `tugmcp_3rd_httplib` — cpp-httplib
 - `tugmcp_3rd_doctest` — doctest
 - `tugmcp_3rd_jsoncons` — jsoncons (2020-12 schema)
 - `tugmcp_3rd_valijson` — Valijson (draft-07 schema)

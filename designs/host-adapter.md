@@ -4,7 +4,7 @@
 
 ## 1. 结论
 
-- **进程内嵌**：`tugmcp` 以静态库或 header-only 方式链接进宿主应用；不新建第二个进程、不创建第二个 UI 主循环实例。
+- **进程内嵌**：`tugmcp` 以静态库或单头发布 artifact 方式链接进宿主应用；不新建第二个进程、不创建第二个 UI 主循环实例。split-header `TUGMCP_HEADER_ONLY` 模式未实现。
 - **库只做协议/传输**：MCP server/client、stdio/HTTP、JSON-RPC、schema 校验、cancel/progress、auth/approval hooks。
 - **宿主做业务与安全**：任务、业务操作、参数、硬件控制、外设、文件、审计、审批、设备联锁留在宿主适配层。
 - **不覆盖现有 UI 回调**：宿主的业务事件回调可能是单槽；适配层必须做 fan-out，保留原有 UI 消费者。

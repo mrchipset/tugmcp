@@ -31,6 +31,7 @@
 tugmcp/
   AGENTS.md
   README.md
+  LICENSE                      # 项目许可证（MIT）
   designs/
     README.md
     mcp-library-design.md      # 主设计
@@ -108,7 +109,7 @@ tugmcp/
 - TLS 产物在 `<httplib.h>` 前发出 `TUGMCP_TLS_ENABLED=1` + `CPPHTTPLIB_OPENSSL_SUPPORT`；**每个看到 `httplib.h` 的 TU 必须一致**，禁止在同一程序混用 TLS/非 TLS 产物。
 - 所有非模板自由函数用 `inline`；常量/变量用 `inline constexpr`；禁止在头文件定义非 inline 全局对象。
 - 必须通过“两个 TU 同时 include”的 ODR/链接测试；单头测试在 `tests/amalgamation/`，外部 Inspector/conformance 验证通过 `TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION` 控制，默认存在（缺工具 fail loud）。
-- 发布：`amalgamate` 生成三个头；`amalgamate-release` 通过 `tools/package_amalgamation.py` 输出 `build/amalgamation/release`（含 `SHA256SUMS`、`NOTICE`、`README.md`、`LICENSES/`）。记录哈希在 `tests/amalgamation/{core,http,http_tls}.sha256`。
+- 发布：`amalgamate` 生成三个头；`amalgamate-release` 通过 `tools/package_amalgamation.py` 输出 `build/amalgamation/release`（含 `LICENSE`、`SHA256SUMS`、`NOTICE`、`README.md`、`LICENSES/`）。记录哈希在 `tests/amalgamation/{core,http,http_tls}.sha256`；项目为 MIT。
 - schema（jsoncons/Valijson）与 legacy HTTP+SSE 不进入单头。
 - `tugmcp::tests` 是 **INTERFACE helper 库**（fake transport / conformance helpers / fixture 头，INTERFACE 传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）是独立 target，**始终编译**。
 - 详细说明见 `designs/header-only.md` §9 与 `docs/amalgamation.md`。
