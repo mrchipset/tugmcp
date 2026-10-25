@@ -112,29 +112,47 @@ if(Python3_Interpreter_FOUND)
     TIMEOUT 600
     RUN_SERIAL TRUE
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
 
-  # External Inspector + conformance verification of the HTTP artifact. It
-  # generates both headers itself, so the gate is on the toolchain (Python, Node
-  # via npx, vendored HTTP dependency), not on pre-existing build outputs.
-  find_program(TUGMCP_AMALGAMATION_NPX NAMES npx npx.cmd QUIET)
-  if(TUGMCP_WITH_HTTP AND TUGMCP_AMALGAMATION_NPX)
+# External Inspector + conformance verification of the HTTP/HTTP-TLS artifacts.
+# With TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION=ON (default) the test is registered
+# even when prerequisites are absent; it then fails loudly at test time instead
+# of silently disappearing from the ctest list.
+if(TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION)
+  set(TUGMCP_AMALGAMATION_EXTERNAL_REASON "")
+  if(NOT Python3_Interpreter_FOUND)
+    set(TUGMCP_AMALGAMATION_EXTERNAL_REASON
+      "Python 3 interpreter was not found at configure time")
+  elseif(NOT TUGMCP_WITH_HTTP)
+    set(TUGMCP_AMALGAMATION_EXTERNAL_REASON
+      "TUGMCP_WITH_HTTP=OFF, but the HTTP single-header artifact is required")
+  endif()
+
+  if(TUGMCP_AMALGAMATION_EXTERNAL_REASON)
+    add_test(NAME amalgamation.http
+      COMMAND ${CMAKE_COMMAND}
+        "-DREASON=${TUGMCP_AMALGAMATION_EXTERNAL_REASON}"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/require_external.cmake)
+  else()
     add_test(NAME amalgamation.http
       COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/run_external.py
         --core-out ${CMAKE_BINARY_DIR}/amalgamation/http/tugmcp.hpp
         --http-out ${CMAKE_BINARY_DIR}/amalgamation/http/tugmcp_http.hpp
+        --http-tls-out ${CMAKE_BINARY_DIR}/amalgamation/http/tugmcp_http_tls.hpp
         --core-hash ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/core.sha256
         --http-hash ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/http.sha256
+        --http-tls-hash ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/http_tls.sha256
         --json-include ${PROJECT_SOURCE_DIR}/3rd/nlohmann_json
         --httplib-include ${PROJECT_SOURCE_DIR}/3rd/cpp-httplib
         --build-dir ${CMAKE_CURRENT_BINARY_DIR}/amalgamation-http-build
         --conformance-out ${CMAKE_BINARY_DIR}/amalgamation/http/conformance)
-    set_tests_properties(amalgamation.http PROPERTIES
-      LABELS amalgamation
-      TIMEOUT 1800
-      RUN_SERIAL TRUE
-      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
   endif()
+  set_tests_properties(amalgamation.http PROPERTIES
+    LABELS amalgamation
+    TIMEOUT 1800
+    RUN_SERIAL TRUE
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 if(TUGMCP_CONFORMANCE)

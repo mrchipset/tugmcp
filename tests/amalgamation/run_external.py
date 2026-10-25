@@ -33,6 +33,9 @@ import time
 from pathlib import Path
 from typing import Optional, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from process_util import kill_process_tree, run_bounded  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = ROOT / "tools" / "amalgamate.py"
 CONSUMER_PROJECT = ROOT / "tests" / "amalgamation"
@@ -42,6 +45,7 @@ INSPECTOR_PACKAGE = "@modelcontextprotocol/inspector@2.12.0"
 SERVERS = ("tugmcp_amalgamation_stdio_server",
            "tugmcp_amalgamation_http_server",
            "tugmcp_amalgamation_fixture_server")
+TLS_ODR = "tugmcp_amalgamation_http_tls_odr"
 BUILD_CONFIG = "Debug"
 
 
@@ -54,10 +58,16 @@ def printable(command: Sequence[str]) -> str:
 
 
 def run(command: Sequence[str], cwd: Path | None = None,
-        timeout: Optional[int] = None) -> None:
+        timeout: int = 1800) -> None:
     command = [str(part) for part in command]
     print(f"+ {printable(command)}", flush=True)
-    completed = subprocess.run(command, cwd=str(cwd or ROOT), timeout=timeout)
+    try:
+        completed = run_bounded(command, cwd=cwd or ROOT, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise VerificationError(
+            f"command timed out after {timeout}s (process tree killed): "
+            f"{printable(command)}"
+        ) from error
     if completed.returncode != 0:
         raise VerificationError(
             f"command failed with exit code {completed.returncode}: "
@@ -88,9 +98,14 @@ def run_inspector(prefix: Sequence[str], args: Sequence[str],
                   timeout: int = 180) -> dict:
     command = inspector_command(prefix, args)
     print(f"+ {printable(command)}", flush=True)
-    completed = subprocess.run(
-        command, cwd=str(ROOT), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout)
+    try:
+        completed = run_bounded(
+            command, cwd=ROOT, timeout=timeout, capture_output=True)
+    except subprocess.TimeoutExpired as error:
+        raise VerificationError(
+            f"MCP Inspector timed out after {timeout}s "
+            f"(process tree killed): {printable(command)}"
+        ) from error
     if completed.returncode != 0:
         raise VerificationError(
             "MCP Inspector failed "
@@ -112,28 +127,35 @@ def run_inspector(prefix: Sequence[str], args: Sequence[str],
     return payload
 
 
-def generate(profile: str, out: Path, hash_file: Path) -> None:
+def generate(profile: str, out: Path, hash_file: Path,
+             tls: bool = False) -> None:
     out = out.resolve()
     hash_file = hash_file.resolve()
     if not hash_file.is_file():
         raise VerificationError(f"recorded hash file not found: {hash_file}")
-    run([sys.executable, str(GENERATOR), "--profile", profile, "--out", str(out)])
-    run([sys.executable, str(GENERATOR), "--profile", profile, "--check",
-         str(out), "--hash-file", str(hash_file)])
+    variant = ["--tls"] if tls else []
+    label = f"{profile}{'-tls' if tls else ''}"
+    run([sys.executable, str(GENERATOR), "--profile", profile, *variant,
+         "--out", str(out)], timeout=120)
+    run([sys.executable, str(GENERATOR), "--profile", profile, *variant,
+         "--check", str(out), "--hash-file", str(hash_file)], timeout=120)
     size = out.stat().st_size
     digest = hashlib.sha256(out.read_bytes()).hexdigest()
-    print(f"generated {profile}: {out} ({size} bytes, sha256 {digest})",
+    print(f"generated {label}: {out} ({size} bytes, sha256 {digest})",
           flush=True)
 
 
-def check_http_artifact(path: Path) -> None:
+def check_http_artifact(path: Path, tls: bool) -> None:
     text = path.read_text(encoding="utf-8")
     marker = "#ifdef TUGMCP_IMPLEMENTATION"
     if text.count(marker) != 1:
         raise VerificationError("HTTP artifact has no unique implementation marker")
     prelude, implementation = text.split(marker, 1)
-    if "#ifndef TUGMCP_SINGLE_HEADER_HTTP_HPP" not in prelude:
-        raise VerificationError("HTTP artifact does not use its own guard")
+    guard = ("TUGMCP_SINGLE_HEADER_HTTP_TLS_HPP" if tls
+             else "TUGMCP_SINGLE_HEADER_HTTP_HPP")
+    if f"#ifndef {guard}" not in prelude:
+        raise VerificationError(
+            f"HTTP artifact does not use the expected guard {guard}")
     if ("merged from: include/tugmcp/detail/http_httplib.hpp" in prelude or
             "#include <httplib.h>" in prelude):
         raise VerificationError(
@@ -141,31 +163,68 @@ def check_http_artifact(path: Path) -> None:
     if implementation.count("#include <httplib.h>") != 1:
         raise VerificationError(
             "cpp-httplib must be included exactly once in the implementation")
+    httplib_include = implementation.find("#include <httplib.h>")
+    before_httplib = implementation[:httplib_include]
     if "CPPHTTPLIB_OPENSSL_SUPPORT" not in implementation:
         raise VerificationError(
             "cpp-httplib TLS macro handling is missing from the implementation")
-    if "#define TUGMCP_TLS_ENABLED 0" not in implementation:
+    expected_tls = "1" if tls else "0"
+    tls_define = f"#define TUGMCP_TLS_ENABLED {expected_tls}"
+    if tls_define not in implementation:
         raise VerificationError(
-            "non-TLS TUGMCP_TLS_ENABLED default is missing")
+            f"expected {tls_define!r} in the implementation prelude")
+    if tls_define not in before_httplib:
+        raise VerificationError(
+            "TUGMCP_TLS_ENABLED must be defined before <httplib.h>")
+    if tls and "#define CPPHTTPLIB_OPENSSL_SUPPORT" not in before_httplib:
+        raise VerificationError(
+            "CPPHTTPLIB_OPENSSL_SUPPORT must precede <httplib.h>")
+    if "#ifndef NOMINMAX" not in before_httplib:
+        raise VerificationError("NOMINMAX must precede <httplib.h>")
     if "transport/legacy_sse.hpp" in text:
         raise VerificationError("legacy SSE must not enter the HTTP artifact")
 
 
+def openssl_root_hint() -> Optional[Path]:
+    candidates = [
+        os.environ.get("OPENSSL_ROOT_DIR"),
+        os.environ.get("TUGMCP_OPENSSL_ROOT"),
+    ]
+    conda = os.environ.get("CONDA_PREFIX")
+    if conda:
+        candidates.append(str(Path(conda) / "Library"))
+        candidates.append(conda)
+    for value in candidates:
+        if not value:
+            continue
+        root = Path(value)
+        if (root / "include" / "openssl" / "ssl.h").is_file():
+            return root
+    return None
+
+
 def configure_and_build(args: argparse.Namespace) -> Path:
     build_dir = args.build_dir.resolve()
-    run([
+    openssl_root = openssl_root_hint()
+    command = [
         "cmake", "-S", str(CONSUMER_PROJECT), "-B", str(build_dir),
         f"-DTUGMCP_AMALGAMATION_HEADER={args.core_out.resolve()}",
         f"-DTUGMCP_AMALGAMATION_HTTP_HEADER={args.http_out.resolve()}",
+        f"-DTUGMCP_AMALGAMATION_HTTP_TLS_HEADER={args.http_tls_out.resolve()}",
         f"-DTUGMCP_JSON_INCLUDE={args.json_include.resolve()}",
         f"-DTUGMCP_HTTPLIB_INCLUDE={args.httplib_include.resolve()}",
         f"-DCMAKE_BUILD_TYPE={BUILD_CONFIG}",
-    ])
+    ]
+    if openssl_root is not None:
+        command.append(f"-DOPENSSL_ROOT_DIR={openssl_root}")
+    print(f"OpenSSL root hint: {openssl_root or 'system default'}",
+          flush=True)
+    run(command, timeout=300)
     run([
         "cmake", "--build", str(build_dir), "--config", BUILD_CONFIG,
         "--parallel",
-    ])
-    for name in SERVERS:
+    ], timeout=1800)
+    for name in [*SERVERS, TLS_ODR]:
         locate_executable(build_dir, name)
     return build_dir
 
@@ -190,10 +249,13 @@ def start_server(executable: Path, arguments: Sequence[str]) -> tuple[
         subprocess.Popen, int, list[str]]:
     command = [str(executable), *arguments]
     print(f"+ start {printable(command)}", flush=True)
+    popen_options = {}
+    if os.name != "nt":
+        popen_options["start_new_session"] = True
     process = subprocess.Popen(
         command, cwd=str(ROOT), stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE, text=True, encoding="utf-8",
-        errors="replace", bufsize=1)
+        errors="replace", bufsize=1, **popen_options)
     lines: "queue.Queue[str]" = queue.Queue()
     stderr_lines: list[str] = []
 
@@ -230,8 +292,7 @@ def stop_process(process: Optional[subprocess.Popen]) -> None:
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        kill_process_tree(process)
 
 
 def has_echo_tool(payload: dict) -> bool:
@@ -317,11 +378,17 @@ def parse_args() -> argparse.Namespace:
         "--http-out", type=Path,
         default=ROOT / "build" / "amalgamation" / "tugmcp_http.hpp")
     parser.add_argument(
+        "--http-tls-out", type=Path,
+        default=ROOT / "build" / "amalgamation" / "tugmcp_http_tls.hpp")
+    parser.add_argument(
         "--core-hash", type=Path,
         default=CONSUMER_PROJECT / "core.sha256")
     parser.add_argument(
         "--http-hash", type=Path,
         default=CONSUMER_PROJECT / "http.sha256")
+    parser.add_argument(
+        "--http-tls-hash", type=Path,
+        default=CONSUMER_PROJECT / "http_tls.sha256")
     parser.add_argument(
         "--json-include", type=Path,
         default=ROOT / "3rd" / "nlohmann_json")
@@ -341,7 +408,6 @@ def main() -> int:
     args = parse_args()
     server: Optional[subprocess.Popen] = None
     try:
-        npx = npx_command()
         if not (args.json_include / "nlohmann" / "json.hpp").is_file():
             raise VerificationError(
                 f"nlohmann/json.hpp not found under {args.json_include}")
@@ -351,15 +417,24 @@ def main() -> int:
 
         generate("core", args.core_out, args.core_hash)
         generate("http", args.http_out, args.http_hash)
-        check_http_artifact(args.http_out.resolve())
+        generate("http", args.http_tls_out, args.http_tls_hash, tls=True)
+        check_http_artifact(args.http_out.resolve(), tls=False)
+        check_http_artifact(args.http_tls_out.resolve(), tls=True)
 
+        # Build and run the compile/link/ODR checks before requiring Node, so
+        # the TLS proof is never skipped when npx itself is unavailable.
         build_dir = configure_and_build(args)
         stdio = locate_executable(
             build_dir, "tugmcp_amalgamation_stdio_server")
         http = locate_executable(build_dir, "tugmcp_amalgamation_http_server")
         fixture = locate_executable(
             build_dir, "tugmcp_amalgamation_fixture_server")
+        tls_odr = locate_executable(build_dir, TLS_ODR)
 
+        run([str(tls_odr)], timeout=120)
+        print("TLS artifact: two-TU compile/link/ODR passed", flush=True)
+
+        npx = npx_command()
         inspector_stdio(npx, stdio)
 
         http_server, port, _ = start_server(http, ["--http", "--port", "0"])

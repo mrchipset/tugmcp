@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+enable_testing()
+
 if(NOT TUGMCP_AMALGAMATION_HEADER)
   message(FATAL_ERROR "TUGMCP_AMALGAMATION_HEADER=<path to generated core header> is required")
 endif()
@@ -81,8 +83,20 @@ if(TUGMCP_AMALGAMATION_HTTP_HEADER)
       "TUGMCP_HTTPLIB_INCLUDE does not contain httplib.h: ${TUGMCP_HTTPLIB_INCLUDE}")
   endif()
 
-  # Streamable HTTP echo server built from the generated HTTP header.
-  add_executable(tugmcp_amalgamation_http_server consumer_http_server.cpp)
+  # Declaration-only TU: no cpp-httplib include path is provided on purpose.
+  add_library(tugmcp_amalgamation_http_tu2 OBJECT consumer_http_tu2.cpp)
+  target_include_directories(tugmcp_amalgamation_http_tu2 PRIVATE
+    "${TUGMCP_AMALGAMATION_HTTP_DIR}"
+    "${TUGMCP_JSON_INCLUDE}")
+  target_compile_definitions(tugmcp_amalgamation_http_tu2 PRIVATE
+    TUGMCP_HTTP_DECL_HEADER="tugmcp_http.hpp")
+  tugmcp_amalgamation_warnings(tugmcp_amalgamation_http_tu2)
+
+  # Streamable HTTP echo server built from the generated HTTP header. The
+  # declaration-only TU is linked in to prove httplib-free ODR safety.
+  add_executable(tugmcp_amalgamation_http_server
+    consumer_http_server.cpp
+    $<TARGET_OBJECTS:tugmcp_amalgamation_http_tu2>)
   target_include_directories(tugmcp_amalgamation_http_server PRIVATE
     "${TUGMCP_AMALGAMATION_HTTP_DIR}"
     "${TUGMCP_JSON_INCLUDE}"
@@ -111,6 +125,58 @@ if(TUGMCP_AMALGAMATION_HTTP_HEADER)
   tugmcp_amalgamation_warnings(tugmcp_amalgamation_fixture_server)
 endif()
 
-enable_testing()
+if(TUGMCP_AMALGAMATION_HTTP_TLS_HEADER)
+  if(NOT TUGMCP_HTTPLIB_INCLUDE)
+    message(FATAL_ERROR
+      "TUGMCP_HTTPLIB_INCLUDE=<path containing httplib.h> is required with "
+      "TUGMCP_AMALGAMATION_HTTP_TLS_HEADER")
+  endif()
+  get_filename_component(TUGMCP_AMALGAMATION_HTTP_TLS_HEADER
+    "${TUGMCP_AMALGAMATION_HTTP_TLS_HEADER}" ABSOLUTE)
+  get_filename_component(TUGMCP_AMALGAMATION_HTTP_TLS_DIR
+    "${TUGMCP_AMALGAMATION_HTTP_TLS_HEADER}" DIRECTORY)
+  get_filename_component(TUGMCP_AMALGAMATION_HTTP_TLS_NAME
+    "${TUGMCP_AMALGAMATION_HTTP_TLS_HEADER}" NAME)
+  if(NOT EXISTS "${TUGMCP_AMALGAMATION_HTTP_TLS_HEADER}")
+    message(FATAL_ERROR
+      "Generated HTTP TLS header not found: ${TUGMCP_AMALGAMATION_HTTP_TLS_HEADER}")
+  endif()
+  if(NOT EXISTS "${TUGMCP_HTTPLIB_INCLUDE}/httplib.h")
+    message(FATAL_ERROR
+      "TUGMCP_HTTPLIB_INCLUDE does not contain httplib.h: ${TUGMCP_HTTPLIB_INCLUDE}")
+  endif()
+
+  find_package(OpenSSL 3.0 REQUIRED COMPONENTS SSL Crypto)
+
+  add_library(tugmcp_amalgamation_http_tls_tu2 OBJECT consumer_http_tu2.cpp)
+  target_include_directories(tugmcp_amalgamation_http_tls_tu2 PRIVATE
+    "${TUGMCP_AMALGAMATION_HTTP_TLS_DIR}"
+    "${TUGMCP_JSON_INCLUDE}")
+  target_compile_definitions(tugmcp_amalgamation_http_tls_tu2 PRIVATE
+    TUGMCP_HTTP_DECL_HEADER="${TUGMCP_AMALGAMATION_HTTP_TLS_NAME}")
+  tugmcp_amalgamation_warnings(tugmcp_amalgamation_http_tls_tu2)
+
+  add_executable(tugmcp_amalgamation_http_tls_odr
+    consumer_http_tls.cpp
+    $<TARGET_OBJECTS:tugmcp_amalgamation_http_tls_tu2>)
+  target_compile_definitions(tugmcp_amalgamation_http_tls_odr PRIVATE
+    TUGMCP_AMALGAMATION_HTTP_TLS_HEADER_NAME="${TUGMCP_AMALGAMATION_HTTP_TLS_NAME}")
+  target_include_directories(tugmcp_amalgamation_http_tls_odr PRIVATE
+    "${TUGMCP_AMALGAMATION_HTTP_TLS_DIR}"
+    "${TUGMCP_JSON_INCLUDE}"
+    "${TUGMCP_HTTPLIB_INCLUDE}")
+  target_link_libraries(tugmcp_amalgamation_http_tls_odr PRIVATE
+    Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+  if(WIN32)
+    target_link_libraries(tugmcp_amalgamation_http_tls_odr PRIVATE
+      ws2_32 crypt32)
+  endif()
+  tugmcp_amalgamation_warnings(tugmcp_amalgamation_http_tls_odr)
+
+  add_test(NAME amalgamation.http.tls.odr
+    COMMAND tugmcp_amalgamation_http_tls_odr)
+  set_tests_properties(amalgamation.http.tls.odr PROPERTIES TIMEOUT 60)
+endif()
+
 add_test(NAME amalgamation.smoke COMMAND tugmcp_amalgamation_consumer)
 set_tests_properties(amalgamation.smoke PROPERTIES TIMEOUT 60)

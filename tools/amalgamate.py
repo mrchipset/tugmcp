@@ -95,6 +95,38 @@ HTTP_EXCLUSIONS: Dict[str, str] = {
         "Streamable HTTP client; belongs to the H2 HTTP artifact",
 }
 
+# Emitted before detail/http_httplib.hpp and <httplib.h>. Keeping these in the
+# implementation prelude guarantees they precede the third-party include.
+PLATFORM_DEFINES: List[str] = [
+    "// Platform feature macros must precede <httplib.h> and the OS headers.",
+    "#ifndef NOMINMAX",
+    "#define NOMINMAX",
+    "#endif",
+    "#if defined(_WIN32) && !defined(WIN32_LEAN_AND_MEAN)",
+    "#define WIN32_LEAN_AND_MEAN",
+    "#endif",
+]
+
+HTTP_NONTLS_PRELUDE: List[str] = [
+    *PLATFORM_DEFINES,
+    "// Non-TLS default for the HTTP artifact.",
+    "#ifndef TUGMCP_TLS_ENABLED",
+    "#define TUGMCP_TLS_ENABLED 0",
+    "#endif",
+]
+
+HTTP_TLS_PRELUDE: List[str] = [
+    *PLATFORM_DEFINES,
+    "// TLS variant: OpenSSL >= 3.0 is required at compile and link time.",
+    "#ifndef TUGMCP_TLS_ENABLED",
+    "#define TUGMCP_TLS_ENABLED 1",
+    "#endif",
+    "// Must be defined before <httplib.h>; detail/http_httplib.hpp relies on it.",
+    "#ifndef CPPHTTPLIB_OPENSSL_SUPPORT",
+    "#define CPPHTTPLIB_OPENSSL_SUPPORT",
+    "#endif",
+]
+
 EXCLUSIONS: Dict[str, Dict[str, str]] = {
     "core": {
         **HTTP_EXCLUSIONS,
@@ -201,23 +233,19 @@ PROFILES: Dict[str, Profile] = {
             "src/transport/http_client.cpp",
         ],
         "exclusions": EXCLUSIONS["http"],
-        "implementation_prelude": [
-            "// Non-TLS default for the H2 artifact. TLS is a separate H3 variant;",
-            "// consumers may override this macro, but all TUs must agree and link",
-            "// OpenSSL >= 3.0 in that case.",
-            "#ifndef TUGMCP_TLS_ENABLED",
-            "#define TUGMCP_TLS_ENABLED 0",
-            "#endif",
-        ],
+        "implementation_prelude": HTTP_NONTLS_PRELUDE,
         "banner_notes": [
             "//   * Link Threads::Threads and, on Windows, ws2_32. cpp-httplib is an",
             "//     external dependency: put <httplib.h> on the include path.",
-            "//   * TUGMCP_TLS_ENABLED defaults to 0; TLS is a separate H3 variant.",
+            "//   * TUGMCP_TLS_ENABLED is 0 in this artifact; use --tls for the",
+            "//     OpenSSL >= 3.0 variant (also link crypt32 on Windows).",
             "//   * This artifact intentionally excludes legacy HTTP+SSE and schema",
             "//     validator backends.",
         ],
     },
 }
+
+HTTP_TLS_GUARD = "TUGMCP_SINGLE_HEADER_HTTP_TLS_HPP"
 
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*([<\"])([^>\"]+)[>\"]\s*$")
 PRAGMA_ONCE_RE = re.compile(r"^\s*#\s*pragma\s+once\s*$")
@@ -287,6 +315,7 @@ def resolve_project_include(name: str, including: Path) -> Path | None:
         candidates.append(INCLUDE_ROOT / name)
         candidates.append(ROOT / name)
 
+    matches: List[Path] = []
     for candidate in candidates:
         if candidate.is_file():
             resolved = candidate.resolve()
@@ -294,8 +323,14 @@ def resolve_project_include(name: str, including: Path) -> Path | None:
                 resolved.relative_to(ROOT)
             except ValueError:
                 continue
-            return resolved
-    return None
+            if resolved not in matches:
+                matches.append(resolved)
+    if len(matches) > 1:
+        raise GenerationError(
+            f"ambiguous project include {name!r} in {including}: "
+            + ", ".join(repo_relative(path) for path in matches)
+        )
+    return matches[0] if matches else None
 
 
 def find_matching_endif(lines: Sequence[str], start: int) -> int:
@@ -533,6 +568,33 @@ def profile_input_paths(profile: Profile) -> Tuple[Set[Path], Set[str]]:
     return paths, relative_paths
 
 
+def validate_no_duplicate_inputs(profile_name: str, profile: Profile) -> None:
+    seen: Dict[str, str] = {}
+    duplicates: List[str] = []
+    groups = (
+        ("public header", PUBLIC_ROOT, profile["public_headers"]),
+        ("internal header", ROOT, profile["internal_headers"]),
+        ("source", ROOT, profile["sources"]),
+    )
+    for group_name, base, entries in groups:
+        for entry in entries:
+            path = (base / entry).resolve()
+            try:
+                key = repo_relative(path)
+            except ValueError:
+                raise GenerationError(
+                    f"profile {profile_name}: input escapes the repository: {entry}"
+                ) from None
+            if key in seen:
+                duplicates.append(f"{key} ({seen[key]} and {group_name})")
+            else:
+                seen[key] = group_name
+    if duplicates:
+        raise GenerationError(
+            f"profile {profile_name}: duplicate inputs: " + "; ".join(duplicates)
+        )
+
+
 def validate_profile_completeness(
     profile_name: str, profile: Profile
 ) -> None:
@@ -658,6 +720,22 @@ def mask_cpp(text: str) -> str:
     while index < size:
         char = text[index]
         if state == "normal":
+            if char == "R" and index + 1 < size and text[index + 1] == '"':
+                # Raw string literal: R"delim( ... )delim". Blank the whole
+                # literal (preserving newlines) so quotes/parens inside it do
+                # not confuse the declaration scanner.
+                delimiter_start = index + 2
+                open_paren = text.find("(", delimiter_start)
+                if open_paren != -1:
+                    delimiter = text[delimiter_start:open_paren]
+                    terminator = ")" + delimiter + '"'
+                    end = text.find(terminator, open_paren + 1)
+                    stop = (end + len(terminator)) if end != -1 else size
+                    for raw_index in range(index, stop):
+                        if chars[raw_index] != "\n":
+                            chars[raw_index] = " "
+                    index = stop
+                    continue
             if char == "/" and index + 1 < size and text[index + 1] == "/":
                 chars[index] = chars[index + 1] = " "
                 index += 2
@@ -821,36 +899,162 @@ def scan_anonymous_names(path: Path) -> Set[str]:
     return names
 
 
+def _brace_contexts(masked: str) -> Dict[int, bool]:
+    """Map ``{`` positions to True when the brace opens a namespace."""
+    contexts: Dict[int, bool] = {}
+    for match in re.finditer(r"\{", masked):
+        index = match.start()
+        segment_start = max(
+            masked.rfind(";", 0, index),
+            masked.rfind("{", 0, index),
+            masked.rfind("}", 0, index),
+        )
+        prefix = masked[segment_start + 1:index]
+        contexts[index] = bool(re.search(r"\bnamespace\b", prefix))
+    return contexts
+
+
+def scan_file_scope_static_names(path: Path) -> Set[str]:
+    """Return namespace/file-scope ``static`` declaration names.
+
+    Class-scope and function-local statics are skipped: merging independent
+    source files only creates collisions at namespace scope.
+    """
+    if not path.is_file():
+        raise GenerationError(f"input file not found: {path}")
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    masked = strip_preprocessor_lines(mask_cpp(text))
+    contexts = _brace_contexts(masked)
+    names: Set[str] = set()
+
+    for match in re.finditer(r"\bstatic\b", masked):
+        position = match.end()
+        stack: List[bool] = []
+        for index in range(position):
+            if masked[index] == "{":
+                stack.append(contexts.get(index, False))
+            elif masked[index] == "}" and stack:
+                stack.pop()
+        if any(not namespace for namespace in stack):
+            continue
+
+        tail = masked[position:]
+        semicolon = tail.find(";")
+        brace = tail.find("{")
+        limit_candidates = [value for value in (semicolon, brace) if value != -1]
+        limit = min(limit_candidates) if limit_candidates else len(tail)
+        declaration = tail[:limit]
+        first_paren = declaration.find("(")
+        assignment = declaration.find("=")
+        if first_paren != -1 and (assignment == -1 or first_paren < assignment):
+            name_match = re.search(
+                r"([A-Za-z_]\w*)\s*$", declaration[:first_paren]
+            )
+        else:
+            for stop_char in ("=", "["):
+                stop = declaration.find(stop_char)
+                if stop != -1:
+                    declaration = declaration[:stop]
+            name_match = re.search(r"([A-Za-z_]\w*)\s*$", declaration)
+        if name_match and name_match.group(1) != "static":
+            names.add(name_match.group(1))
+    return names
+
+
+def scan_macro_definitions(path: Path) -> Dict[str, str]:
+    """Return ``#define NAME`` -> normalized replacement text."""
+    if not path.is_file():
+        raise GenerationError(f"input file not found: {path}")
+    lines = normalize_lines(path.read_text(encoding="utf-8"))
+    macros: Dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(
+            r"^\s*#\s*define\s+([A-Za-z_]\w*)(.*)$", line
+        )
+        if not match:
+            index += 1
+            continue
+        name = match.group(1)
+        body = [match.group(2)]
+        while line.rstrip().endswith("\\") and index + 1 < len(lines):
+            index += 1
+            line = lines[index]
+            body.append(line)
+        macros[name] = " ".join(part.rstrip("\\").strip() for part in body)
+        index += 1
+    return macros
+
+
 def check_anonymous_collisions(entries: Sequence[Tuple[str, Path]]) -> None:
-    owners: Dict[str, Set[str]] = {}
+    anonymous_owners: Dict[str, Set[str]] = {}
+    static_owners: Dict[str, Set[str]] = {}
+    macro_owners: Dict[str, Dict[str, Set[str]]] = {}
     for label, path in entries:
         for name in scan_anonymous_names(path):
-            owners.setdefault(name, set()).add(label)
+            anonymous_owners.setdefault(name, set()).add(label)
+        for name in scan_file_scope_static_names(path):
+            static_owners.setdefault(name, set()).add(label)
+        for name, body in scan_macro_definitions(path).items():
+            macro_owners.setdefault(name, {}).setdefault(body, set()).add(label)
 
-    collisions = {
-        name: sorted(labels)
-        for name, labels in owners.items()
-        if len(labels) > 1
-    }
+    collisions: List[str] = []
+    for kind, owners in (
+        ("anonymous-namespace", anonymous_owners),
+        ("file-scope static", static_owners),
+    ):
+        for name, labels in sorted(owners.items()):
+            if len(labels) > 1:
+                collisions.append(f"{kind} {name} in {', '.join(sorted(labels))}")
+    for name, bodies in sorted(macro_owners.items()):
+        if len(bodies) > 1:
+            labels = sorted(
+                label for owners in bodies.values() for label in owners
+            )
+            collisions.append(
+                f"macro {name} with conflicting definitions in "
+                + ", ".join(labels)
+            )
     if collisions:
-        details = "; ".join(
-            f"{name} in {', '.join(labels)}"
-            for name, labels in sorted(collisions.items())
-        )
         raise GenerationError(
-            "anonymous-namespace name collision across merged files: " + details
+            "merged name collision across files: " + "; ".join(collisions)
         )
 
 
-def generate(profile_name: str) -> str:
+def resolve_profile(profile_name: str, tls: bool) -> Profile:
     if profile_name not in PROFILES:
         known = ", ".join(sorted(PROFILES))
         raise GenerationError(
             f"unknown profile '{profile_name}' (available: {known})"
         )
+    if tls and profile_name != "http":
+        raise GenerationError("--tls is only supported with --profile http")
 
-    profile = PROFILES[profile_name]
+    profile = dict(PROFILES[profile_name])
+    if tls:
+        profile["guard"] = HTTP_TLS_GUARD
+        profile["display_name"] = "core + stdio + Streamable HTTP/SSE (TLS)"
+        profile["implementation_prelude"] = HTTP_TLS_PRELUDE
+        profile["banner_notes"] = [
+            "//   * Link Threads::Threads, OpenSSL >= 3.0 (SSL/Crypto) and, on",
+            "//     Windows, ws2_32 plus crypt32. cpp-httplib is external.",
+            "//   * TUGMCP_TLS_ENABLED is 1 and CPPHTTPLIB_OPENSSL_SUPPORT is",
+            "//     defined before <httplib.h>. All TUs must use this variant.",
+            "//   * This artifact intentionally excludes legacy HTTP+SSE and schema",
+            "//     validator backends.",
+        ]
+    return profile  # type: ignore[return-value]
+
+
+def artifact_key(profile_name: str, tls: bool) -> str:
+    return "http_tls" if profile_name == "http" and tls else profile_name
+
+
+def generate(profile_name: str, tls: bool = False) -> str:
+    profile = resolve_profile(profile_name, tls)
     validate_profile_completeness(profile_name, profile)
+    validate_no_duplicate_inputs(profile_name, profile)
     input_paths, input_relative_paths = profile_input_paths(profile)
 
     collision_entries: List[Tuple[str, Path]] = []
@@ -913,7 +1117,7 @@ def generate(profile_name: str) -> str:
         *profile["banner_notes"],
         "//",
         f"// Guard: {guard}",
-        f"// Profile: {profile_name}",
+        f"// Profile: {profile_name}{' (TLS)' if tls else ''}",
         "",
         f"#ifndef {guard}",
         f"#define {guard}",
@@ -988,6 +1192,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         description="Generate the tugmcp single-header release artifact."
     )
     parser.add_argument("--profile", required=True, help="artifact profile")
+    parser.add_argument(
+        "--tls",
+        action="store_true",
+        help="generate the TLS HTTP variant (requires --profile http)",
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--out", type=Path, help="write the header to this path")
     group.add_argument(
@@ -1009,15 +1218,18 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if args.hash_file is not None and args.check is None:
         parser.error("--hash-file requires --check")
+    if args.tls and args.profile != "http":
+        parser.error("--tls is only supported with --profile http")
 
     hash_file = args.hash_file
     if hash_file is None and args.check is not None:
-        candidate = ROOT / "tests" / "amalgamation" / f"{args.profile}.sha256"
+        key = artifact_key(args.profile, args.tls)
+        candidate = ROOT / "tests" / "amalgamation" / f"{key}.sha256"
         if candidate.is_file():
             hash_file = candidate
 
     try:
-        generated = generate(args.profile)
+        generated = generate(args.profile, args.tls)
         payload = generated.encode("utf-8")
         generated_hash = sha256(payload)
         expected_hash = (

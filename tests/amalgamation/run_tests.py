@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from process_util import run_bounded  # noqa: E402
 GENERATOR = ROOT / "tools" / "amalgamate.py"
 CONSUMER_PROJECT = ROOT / "tests" / "amalgamation"
 
@@ -37,10 +39,17 @@ def recorded_hash(path: Path) -> str:
     return tokens[0].lower()
 
 
-def run(command: list[str], cwd: Path | None = None) -> None:
+def run(command: list[str], cwd: Path | None = None,
+        timeout: int = 1800) -> None:
     printable = " ".join(str(part) for part in command)
     print(f"+ {printable}", flush=True)
-    completed = subprocess.run(command, cwd=cwd or ROOT)
+    try:
+        completed = run_bounded(command, cwd=cwd or ROOT, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"command timed out after {timeout}s (process tree killed): "
+            f"{printable}"
+        ) from error
     if completed.returncode != 0:
         raise RuntimeError(
             f"command failed with exit code {completed.returncode}: {printable}"
@@ -122,6 +131,47 @@ def run_negative_tests(temp: Path, generated: Path) -> None:
     else:
         raise RuntimeError("duplicate anonymous-namespace name was not rejected")
 
+    duplicate_profile = dict(module.PROFILES["core"])
+    duplicate_profile["sources"] = [
+        *duplicate_profile["sources"],
+        duplicate_profile["sources"][0],
+    ]
+    try:
+        module.validate_no_duplicate_inputs("core", duplicate_profile)
+    except module.GenerationError:
+        pass
+    else:
+        raise RuntimeError("duplicate profile input was not rejected")
+
+    static_a = temp / "static_a.cpp"
+    static_b = temp / "static_b.cpp"
+    static_body = (
+        "namespace mcp { namespace v1 { static int duplicateStatic = 1; } }\n"
+    )
+    static_a.write_text(static_body, encoding="utf-8")
+    static_b.write_text(static_body, encoding="utf-8")
+    try:
+        module.check_anonymous_collisions(
+            [("static_a.cpp", static_a), ("static_b.cpp", static_b)]
+        )
+    except module.GenerationError:
+        pass
+    else:
+        raise RuntimeError("duplicate file-scope static was not rejected")
+
+    macro_a = temp / "macro_a.cpp"
+    macro_b = temp / "macro_b.cpp"
+    macro_a.write_text("#define TUGMCP_DUP_MACRO 1\n", encoding="utf-8")
+    macro_b.write_text("#define TUGMCP_DUP_MACRO 2\n", encoding="utf-8")
+    try:
+        module.check_anonymous_collisions(
+            [("macro_a.cpp", macro_a), ("macro_b.cpp", macro_b)]
+        )
+    except module.GenerationError:
+        pass
+    else:
+        raise RuntimeError("conflicting merged macro was not rejected")
+
     mismatch = temp / "mismatch.hpp"
     shutil.copyfile(generated, mismatch)
     with mismatch.open("ab") as handle:
@@ -138,13 +188,15 @@ def run_negative_tests(temp: Path, generated: Path) -> None:
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=120,
     )
     if completed.returncode != 1:
         raise RuntimeError("--check did not reject a mismatched artifact")
 
     print(
         "negative tests: unresolved include, include outside profile, "
-        "duplicate anon name, --check mismatch"
+        "duplicate anon name/static/macro, duplicate profile input, "
+        "--check mismatch"
     )
 
 
@@ -209,7 +261,8 @@ def main() -> int:
                     args.profile,
                     "--out",
                     str(out),
-                ]
+                ],
+                timeout=120,
             )
 
             # 2. Determinism: generate again and compare hashes.
@@ -221,7 +274,8 @@ def main() -> int:
                     args.profile,
                     "--out",
                     str(second),
-                ]
+                ],
+                timeout=120,
             )
             first_hash = sha256(out)
             second_hash = sha256(second)
@@ -251,7 +305,8 @@ def main() -> int:
                     str(out),
                     "--hash-file",
                     str(hash_file),
-                ]
+                ],
+                timeout=120,
             )
 
             # 4. Cheap negative tests.
@@ -268,7 +323,8 @@ def main() -> int:
                     f"-DTUGMCP_AMALGAMATION_HEADER={out}",
                     f"-DTUGMCP_JSON_INCLUDE={json_include}",
                     "-DCMAKE_BUILD_TYPE=Debug",
-                ]
+                ],
+                timeout=300,
             )
             run(
                 [
@@ -278,7 +334,8 @@ def main() -> int:
                     "--config",
                     "Debug",
                     "--parallel",
-                ]
+                ],
+                timeout=1800,
             )
             run(
                 [
@@ -288,7 +345,8 @@ def main() -> int:
                     "-C",
                     "Debug",
                     "--output-on-failure",
-                ]
+                ],
+                timeout=900,
             )
     except RuntimeError as error:
         print(f"error: {error}", file=sys.stderr)

@@ -13,6 +13,10 @@
 #include <string>
 #include <utility>
 
+// Defined by consumer_http_tu2.cpp, which includes the generated header
+// without TUGMCP_IMPLEMENTATION and without a cpp-httplib include path.
+int consumerHttpSecondUnit();
+
 namespace {
 
 using namespace mcp::v1;
@@ -33,6 +37,11 @@ public:
 } // namespace
 
 int main(int argc, char** argv) {
+  if (consumerHttpSecondUnit() != 0) {
+    std::cerr << "amalgamation-echo: HTTP second TU failed\n";
+    return 1;
+  }
+
   bool http = false;
   int port = 0;
   std::string bind = "127.0.0.1";

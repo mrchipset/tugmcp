@@ -61,6 +61,11 @@ REQUIRED_SERVER_SCENARIOS = {
     },
 }
 
+REQUIRED_CHECK_COUNTS = {
+    "2026-07-28": 121,
+    "2025-11-25": 73,
+}
+
 KNOWN_UNSCORED = {
     "2025-11-25": {
         "server-sse-polling": "requirements yaml marks it pending",
@@ -310,15 +315,24 @@ def main() -> int:
               flush=True)
 
     total = len(checks)
+    expected_count = REQUIRED_CHECK_COUNTS[args.revision]
+    count_ok = total == expected_count
     failed = len(failures) + len(unexpected_skips)
     unexpected_passes = [
         check_id for kind, check_id in expected_events
         if kind == "unexpected-pass"
     ]
-    print(f"\nTotal required checks: {total}, failures: {len(failures)}, "
+    print(f"\nTotal required checks: {total} "
+          f"(pinned {expected_count}), failures: {len(failures)}, "
           f"unexpected skipped: {len(unexpected_skips)}, "
           f"expected-failure now passing: {len(unexpected_passes)}, "
           f"expected-failure absent: {len(missing_expected)}", flush=True)
+    if not count_ok:
+        print(
+            f"error: required check count changed for {args.revision}: "
+            f"expected exactly {expected_count}, saw {total}",
+            file=sys.stderr,
+        )
 
     for scenario, check_id, message in failures:
         print(f"FAIL {scenario}/{check_id}: {message}", flush=True)
@@ -337,6 +351,7 @@ def main() -> int:
     ok = (
         not npx_failed
         and completeness_ok
+        and count_ok
         and bool(checks)
         and failed == 0
         and not unexpected_passes

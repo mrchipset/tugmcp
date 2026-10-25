@@ -10,6 +10,8 @@ option(TUGMCP_BUILD_EXAMPLES "Build tugmcp examples" ON)
 option(TUGMCP_WITH_HTTP "Build the Streamable HTTP transport" ON)
 option(TUGMCP_TLS "Enable TLS support (OpenSSL >= 3.0)" OFF)
 option(TUGMCP_HEADER_ONLY "Consume the library header-only (not implemented yet)" OFF)
+option(TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION
+  "Require single-header external Inspector/conformance tests (fails loudly if prerequisites are missing)" ON)
 option(TUGMCP_USE_SYSTEM_DEPS "Use system packages instead of 3rd/ (not implemented yet)" OFF)
 option(TUGMCP_VERIFY_3RD_HASHES "Verify SHA256 of vendored dependencies" ON)
 option(TUGMCP_WITH_JSONCONS "Enable 2020-12 schema validation via jsoncons" OFF)
