@@ -1,78 +1,120 @@
-﻿# Header-only 鍙鎬т笌宸ラ噺
+# Header-only 可行性与工量
 
-> 闂锛歚tugmcp` 鏄惁涔熷彲浠ュ仛鎴?header-only锛熸槸鍚﹁澧炲姞寰堝宸ヤ綔閲忥紵
+> 问题：`tugmcp` 是否也可以做成 header-only？是否要增加很多工作量？
 >
-> 缁撹锛?*鍙互**銆傞粯璁ゆ瀯寤轰骇鐗╀负闈欐€佸簱锛屽悓鏃舵敮鎸佷互 header-only 鏂瑰紡娑堣垂锛坄TUGMCP_HEADER_ONLY=ON` 鏄惧紡寮€鍚級锛岃€屼笉鏄竴寮€濮嬪氨鍋氫竴涓法澶х殑鍗曞ご鏂囦欢銆傚伐浣滈噺澧炲姞鏈夐檺锛堣璁￠樁娈电害 +15鈥?5%锛夛紝涓昏鎴愭湰鍦ㄧ紪璇戞椂闂淬€丱DR 绾緥鍜?HTTP 渚濊禆鐨勪紶閫掞紝涓嶅湪鍗忚閫昏緫鏈韩銆?
-## 1. 涓轰粈涔堝彲琛?
-褰撳墠璁捐鐨勪富瑕佷緷璧栭兘鏀寔 header-only锛?
-| 渚濊禆 | 褰㈡€?| 褰卞搷 |
-|---|---|---|
-| nlohmann/json | 鍗曞ご | 宸插ぉ鐒?header-only |
-| cpp-httplib | 鍗曞ご | HTTP/SSE 鍙?header-only锛屼絾浼氫紶閫?ws2_32/crypt32锛圱LS锛?Threads 閾炬帴瑕佹眰 |
-| jsoncons | 鍗曞ご锛堝彲閫夛級 | schema 2020-12 鍙?header-only |
-| Valijson | 鍗曞ご锛堝彲閫夛級 | draft-07 鍙?header-only |
-| 鏍囧噯搴?| 鈥?| thread/mutex/condition_variable 闇€瑕侀摼鎺ュ钩鍙扮嚎绋嬪簱锛圕Make 鐢?`Threads::Threads`锛?|
+> 结论：**可以**。默认构建产物为静态库，同时支持以 header-only 方式消费（`TUGMCP_HEADER_ONLY=ON` 显式开启），而不是一开始就做一个巨大的单头文件。工作量增加有限（设计阶段约 +15–25%），主要成本在编译时间、ODR 纪律和 HTTP 依赖的传递，不在协议逻辑本身。
 
-鍗忚/缂栬В鐮?registry/dispatcher/transport 鎶借薄鏈韩鏄櫘閫?C++锛屾病鏈夊繀椤绘斁鍒?`.cpp` 鐨勫ぉ鐒惰竟鐣屻€?
-## 2. 鎺ㄨ崘褰㈡€?
-**榛樿鏋勫缓浜х墿涓洪潤鎬佸簱锛涘悓鏃舵敮鎸佷互 header-only 鏂瑰紡娑堣垂锛坄TUGMCP_HEADER_ONLY=ON` 鏄惧紡寮€鍚級銆?*
+## 1. 为什么可行
+
+当前设计的主要依赖都支持 header-only：
+
+| 依赖 | 形态 | 影响 |
+|---|---|---|
+| nlohmann/json | 单头 | 已天然 header-only |
+| cpp-httplib | 单头 | HTTP/SSE 可 header-only，但会传递 ws2_32/crypt32（TLS）/Threads 链接要求 |
+| jsoncons | 单头（可选） | schema 2020-12 可 header-only |
+| Valijson | 单头（可选） | draft-07 可 header-only |
+| 标准库 | — | thread/mutex/condition_variable 需要链接平台线程库（CMake 用 `Threads::Threads`） |
+
+协议/编解码/registry/dispatcher/transport 抽象本身是普通 C++，没有必须放到 `.cpp` 的天然边界。
+
+## 2. 推荐形态
+
+**默认构建产物为静态库；同时支持以 header-only 方式消费（`TUGMCP_HEADER_ONLY=ON` 显式开启）。**
 
 ```text
 include/tugmcp/
-  core.hpp                 // 绫诲瀷/閿欒/JSON-RPC/涓婁笅鏂囷紙杞伙級
+  core.hpp                 // 类型/错误/JSON-RPC/上下文（轻）
   server.hpp
   client.hpp
-  transport/stdio.hpp      // 杞伙紝浠?OS pipe/绾跨▼
-  transport/http.hpp       // 浠呭０鏄庯細TlsOptions / StreamableHttp*/宸ュ巶锛涗笉鍚?cpp-httplib
-  detail/http_httplib.hpp  // header-only 瀹炵幇锛屽敮涓€ include cpp-httplib 鐨勫疄鐜板ご
+  transport/stdio.hpp      // 轻，仅 OS pipe/线程
+  transport/http.hpp       // 仅声明：TlsOptions / StreamableHttp*/工厂；不含 cpp-httplib
+  detail/http_httplib.hpp  // header-only 实现，唯一 include cpp-httplib 的实现头
   protocol/v2026.hpp
   protocol/v2025.hpp
-  schema/jsoncons.hpp      // 鍙€?  schema/valijson.hpp      // 鍙€?  schema/null.hpp          // 娴嬭瘯
-  tugmcp.hpp               // 鐢熸垚鐨?amalgamation锛堝彂甯冪敤锛屼笉鎵嬪啓锛?```
+  schema/jsoncons.hpp      // 可选
+  schema/valijson.hpp      // 可选
+  schema/null.hpp          // 测试
+  tugmcp.hpp               // 生成的 amalgamation（发布用，不手写）
+```
 
-- 鍏叡澶村彧鍏佽 include nlohmann/json锛坄Json` 鏆撮湶锛変笌瀵瑰簲鍙€?schema target 鐨勭涓夋柟澶达紱`core.hpp`/`server.hpp`/`client.hpp`/`transport/http.hpp` 姘镐笉 include cpp-httplib/GUI 妗嗘灦澶淬€?- `detail/http_httplib.hpp` 鎵嶅紩鍏?cpp-httplib锛涗笉浣跨敤 HTTP 鐨勬秷璐硅€呬笉浠樿繖浠界紪璇戞垚鏈€?- 鍗曞ご `tugmcp.hpp` 鐢辫剼鏈妸闇€瑕佺殑澶存寜椤哄簭鍚堝苟鐢熸垚锛屽苟鍋氬弻 TU/ODR 娴嬭瘯锛涗笉瑕佹墜宸ョ淮鎶や袱浠藉疄鐜般€?- `TUGMCP_HEADER_ONLY` 鏄?**CMake option**锛歄N 鏃剁浉鍏?target 鍙樹负 INTERFACE锛堜笉缂栬瘧 `src/`锛夈€?- `TUGMCP_IMPLEMENTATION` 鏄?**瀹?*锛歨eader-only / amalgamation 鍦烘櫙鐨勫崟 TU 瀹炵幇瀹忋€?
-## 3. 闇€瑕侀澶栧仛鐨勫伐浣?
-| 宸ヤ綔 | 璇存槑 | 宸ラ噺 |
+- 公共头只允许 include nlohmann/json（`Json` 暴露）与对应可选 schema target 的第三方头；`core.hpp`/`server.hpp`/`client.hpp`/`transport/http.hpp` 永不 include cpp-httplib/GUI 框架头。
+- `detail/http_httplib.hpp` 才引入 cpp-httplib；不使用 HTTP 的消费者不付这份编译成本。
+- 单头 `tugmcp.hpp` 由脚本把需要的头按顺序合并生成，并做双 TU/ODR 测试；不要手工维护两份实现。
+- `TUGMCP_HEADER_ONLY` 是 **CMake option**：ON 时相关 target 变为 INTERFACE（不编译 `src/`）。
+- `TUGMCP_IMPLEMENTATION` 是 **宏**：header-only / amalgamation 场景的单 TU 实现宏。
+
+## 3. 需要额外做的工作
+
+| 工作 | 说明 | 工量 |
 |---|---|---|
-| ODR/inline 绾緥 | 闈炴ā鏉胯嚜鐢卞嚱鏁?`inline`锛涘父閲?`inline constexpr`锛涚姝㈠ご鏂囦欢閲岀殑闈?inline 鍏ㄥ眬瀵硅薄 | 灏忥紝浣嗗繀椤?CI 妫€鏌?|
-| 鍙?TU 娴嬭瘯 | 涓や釜 `.cpp` 鍚屾椂 include `tugmcp.hpp`/`core.hpp`锛岄摼鎺ユ棤閲嶅绗﹀彿 | 灏?|
-| 缂栬瘧鏃堕棿 | cpp-httplib + nlohmann + 妯℃澘浼氭斁澶ф瘡涓?TU 鐨勭紪璇戞垚鏈?| 涓紱鐢?feature headers/缂栬瘧妯″紡缂撹В |
-| 浜岃繘鍒跺ぇ灏?| inline 浠ｇ爜鍦ㄥ TU 閲嶅锛汱TO/`-ffunction-sections` 鍙紦瑙?| 涓?|
-| 閾炬帴瑕佹眰 | Windows `ws2_32`锛圱LS 鏃?`crypt32`锛夛紱绾跨▼鐢?`Threads::Threads`锛汿LS 闇€ OpenSSL 鈮?.0锛汣Make target 蹇呴』鍐欐竻 | 灏?|
-| 鍙€変緷璧?瀹?| `TUGMCP_WITH_HTTP`銆乣TUGMCP_WITH_JSONCONS`銆乣TUGMCP_WITH_VALIJSON`銆乣TUGMCP_TLS` 鐨勪竴鑷存€?| 灏忊€撲腑 |
-| ABI/瀹炵幇闅愯棌 | header-only 鏆撮湶瀹炵幇锛汥LL/鎻掍欢鍦烘櫙涓嶉€傚悎 | 璁捐鍙栬垗 |
-| 娴嬭瘯鐭╅樀 | MSVC/GCC/Clang銆佸崟 TU/澶?TU銆乭eader-only/缂栬瘧妯″紡銆乀LS on/off | 涓?|
+| ODR/inline 纪律 | 非模板自由函数 `inline`；常量 `inline constexpr`；禁止头文件里的非 inline 全局对象 | 小，但必须 CI 检查 |
+| 双 TU 测试 | 两个 `.cpp` 同时 include `tugmcp.hpp`/`core.hpp`，链接无重复符号 | 小 |
+| 编译时间 | cpp-httplib + nlohmann + 模板会放大每个 TU 的编译成本 | 中；用 feature headers/编译模式缓解 |
+| 二进制大小 | inline 代码在多 TU 重复；LTO/`-ffunction-sections` 可缓解 | 中 |
+| 链接要求 | Windows `ws2_32`（TLS 时 `crypt32`）；线程用 `Threads::Threads`；TLS 需 OpenSSL ≥3.0；CMake target 必须写清 | 小 |
+| 可选依赖/宏 | `TUGMCP_WITH_HTTP`、`TUGMCP_WITH_JSONCONS`、`TUGMCP_WITH_VALIJSON`、`TUGMCP_TLS` 的一致性 | 小–中 |
+| ABI/实现隐藏 | header-only 暴露实现；DLL/插件场景不适合 | 设计取舍 |
+| 测试矩阵 | MSVC/GCC/Clang、单 TU/多 TU、header-only/编译模式、TLS on/off | 中 |
 
-header-only 涓?`CPPHTTPLIB_OPENSSL_SUPPORT` 鏃犳硶鍦ㄩ摼鎺ユ湡妫€娴嬭法 TU 涓嶄竴鑷达紝鍥犳鍙敮鎸佺粡 `tugmcp::http` target 娑堣垂锛涚紪璇戞ā寮忎笅璇ュ畯涓?PRIVATE锛岀敱 `detail/http_httplib.hpp` 鐨?`#error` 瀹堝崼鍏滃簳銆?
-`tugmcp::tests` 鏄?INTERFACE helper 搴擄紙fake transport / conformance helpers / fixture 澶达紝浼犳挱 `tugmcp_3rd_doctest`锛夛紱娴嬭瘯鍙墽琛屾枃浠讹紙`tugmcp_unit_tests` 绛夛級鏄嫭绔?target锛?*濮嬬粓缂栬瘧**锛沗TUGMCP_HEADER_ONLY` 鍙奖鍝嶅簱 target銆?
-## 4. 宸ラ噺璇勪及
+header-only 下 `CPPHTTPLIB_OPENSSL_SUPPORT` 无法在链接期检测跨 TU 不一致，因此只支持经 `tugmcp::http` target 消费；编译模式下该宏为 PRIVATE，由 `detail/http_httplib.hpp` 的 `#error` 守卫兜底。
 
-- **浠庤璁″紑濮嬪氨鎸?header-only 璁捐**锛氱浉瀵圭紪璇戝簱锛岀害 **+15鈥?5%** 宸ヤ綔閲忋€備富瑕佹槸澶存枃浠舵媶鍒嗐€丱DR/CI銆佺紪璇戞椂闂磋皟浼橈紝涓嶆槸閲嶅啓鍗忚銆?- **宸叉湁缂栬瘧搴撳啀鏀?header-only**锛氱害 **+30鈥?0%**锛屽洜涓鸿鎶婂疄鐜扮Щ鍏ュご銆佸鐞嗛潤鎬佺姸鎬?鍗曚緥銆佽皟鏁翠緷璧栧拰娴嬭瘯锛涜繕鍙兘鍑虹幇缂栬瘧鏃堕棿/浠ｇ爜鑶ㄨ儉闂銆?- **瀹屾暣鍗曞ご鍖栵紙鍖呮嫭 HTTP/SSE锛?*锛氬彲琛岋紝浣嗘秷璐硅€呮瘡娆＄紪璇戦兘浠?cpp-httplib/nlohmann 鐨勬垚鏈紱澶ч」鐩彲鑳介毦浠ユ帴鍙椼€傚缓璁崟澶村彧浣滀负鍙戝竷浜х墿锛屼笉浣滀负寮€鍙戜富褰㈡€併€?- **涓嶄細**鍥犱负 header-only 灏辫嚜鍔ㄨ幏寰椻€滈浂渚濊禆鈥濓細ws2_32/crypt32/Threads/OpenSSL锛堣嫢 TLS锛変粛鐒惰閾炬帴銆?
-## 5. 浠€涔堟椂鍊欎笉瑕?header-only
+`tugmcp::tests` 是 INTERFACE helper 库（fake transport / conformance helpers / fixture 头，传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）是独立 target，**始终编译**；`TUGMCP_HEADER_ONLY` 只影响库 target。
 
-- 闇€瑕佺ǔ瀹?ABI 鐨?DLL/鎻掍欢杈圭晫锛?- 娑堣垂鑰呭緢澶氥€佺紪璇戞椂闂存晱鎰燂紱
-- 闇€瑕侀殣钘忓疄鐜?鍑忓皯鍏叡澶存毚闇诧紱
-- 闇€瑕佸彲閫変緷璧栭殧绂伙紙HTTP/TLS/schema锛夎€屼笉鎯崇敤瀹忔薄鏌撴秷璐硅€咃紱
-- 闇€瑕?pimpl 鎺у埗浜岃繘鍒跺吋瀹广€?
-杩欎簺鎯呭喌涓嬬敤闈欐€佸簱/缂栬瘧搴撴洿鍚堥€傦紱header-only 鍙綔涓洪檮鍔犲垎鍙戝舰鎬併€?
-## 6. 鎺ㄨ崘鍐崇瓥
+## 4. 工量评估
 
-1. **core/protocol/stdio**锛歨eader-only 鍙嬪ソ锛屼紭鍏堟敮鎸併€?2. **HTTP/SSE**锛氱嫭绔?`transport/http.hpp`锛堜粎澹版槑锛屼笉鍚?cpp-httplib锛夛紝鍙?header-only锛堝疄鐜颁綅浜?`detail/http_httplib.hpp`锛夛紝涔熷彲缂栬瘧鎴?`tugmcp::http`锛涗笉瑕佽 `core.hpp` 浼犻€?cpp-httplib銆俆LS 鏄?`tugmcp::http` 鐨勬瀯寤哄紑鍏筹紙`TUGMCP_TLS`锛夛紝涓嶆柊澧?target銆傜紪璇戞ā寮忎笅 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 涓?PRIVATE锛圤penSSL 浜?PRIVATE锛岄潤鎬佸簱缁?`$<LINK_ONLY:>` 浼犻€掞級锛沨eader-only 妯″紡涓嬭繖浜涘畾涔夋墠璧?INTERFACE锛屼笖娑堣垂鑰呭繀椤诲湪鎵€鏈?TU 浣跨敤鍚屼竴瀹忥紝鍙敮鎸佺粡 `tugmcp::http` target 娑堣垂銆傜紪璇戞ā寮?`src/transport/*.cpp` 鐩存帴 include `httplib.h`锛宍detail/http_httplib.hpp` 涓?header-only 涓撶敤锛涘畧鍗惈 `#ifndef TUGMCP_TLS_ENABLED` 妫€鏌ャ€?3. **schema**锛氱嫭绔嬪彲閫夊ご锛坖soncons/Valijson/null锛夛紝鎸夐渶鍖呭惈銆?4. **鍗曞ご**锛氬彂甯冩椂鐢熸垚 `tugmcp.hpp`锛岄檮甯?SHA256 鍜岀敓鎴愯剼鏈紱寮€鍙戞椂缁存姢 split headers銆?5. **CI**锛氬弻 TU ODR 娴嬭瘯 + MSVC x64 / GCC / Clang + header-only/缂栬瘧妯″紡 + TLS on/off 鍚勪竴閬嶃€?
-## 7. 楠屾敹鏍囧噯
+- **从设计开始就按 header-only 设计**：相对编译库，约 **+15–25%** 工作量。主要是头文件拆分、ODR/CI、编译时间调优，不是重写协议。
+- **已有编译库再改 header-only**：约 **+30–50%**，因为要把实现移入头、处理静态状态/单例、调整依赖和测试；还可能出现编译时间/代码膨胀问题。
+- **完整单头化（包括 HTTP/SSE）**：可行，但消费者每次编译都付 cpp-httplib/nlohmann 的成本；大项目可能难以接受。建议单头只作为发布产物，不作为开发主形态。
+- **不会**因为 header-only 就自动获得“零依赖”：ws2_32/crypt32/Threads/OpenSSL（若 TLS）仍然要链接。
 
-瀹屾暣娴嬭瘯鍒嗗眰瑙?[`testing.md`](./testing.md)锛涙湰鑺傚彧鍒?header-only 鐗规湁楠屾敹椤广€?
-- [ ] 涓や釜 TU 鍚屾椂 include 鍏叡澶达紝閾炬帴鏃犻噸澶嶇鍙枫€?- [ ] `core.hpp` 涓?include cpp-httplib/GUI 妗嗘灦澶达紱`http.hpp` 涓嶈繘鍏?core 缂栬瘧鍗曞厓銆?- [ ] MSVC x64 涓?GCC/Clang 鍚勬瀯寤轰竴涓?echo server/client锛圱LS on/off 鍚勪竴閬嶏級銆?- [ ] header-only 涓庣紪璇戞ā寮忚涓轰竴鑷达紙鍚屼竴娴嬭瘯闆嗭級銆?- [ ] 璁板綍缂栬瘧鏃堕棿/浜岃繘鍒跺ぇ灏忓熀绾匡紱鍗曞ご鐢熸垚鍙鐜般€?- [ ] Windows 閾炬帴 `ws2_32`/`crypt32` 涓?`TUGMCP_TLS` 寮€鍏崇殑璇存槑鍦?README/CMake target 涓彲瑙併€?- [ ] 鍚屼竴杩涚▼鍐呮墍鏈?TU 鐨?`CPPHTTPLIB_OPENSSL_SUPPORT` 瀹氫箟涓€鑷达紙TLS on/off 涓嶆贩鐢級銆?- [ ] `transport/http.hpp` 涓?include 浠讳綍绗笁鏂瑰ご锛汿LS/鏋勫缓妯″紡鍒囨崲涓嶆敼鍙樺叾澹版槑銆?- [ ] `TUGMCP_HEADER_ONLY=ON` + `TUGMCP_ENABLE_LEGACY_SSE=ON` 蹇呴』 configure 澶辫触锛坄FATAL_ERROR`锛夈€?
-## 8. 涓庡涓诲簲鐢ㄧ殑鍏崇郴
+## 5. 什么时候不要 header-only
 
-- 瀹夸富搴旂敤浠ラ潤鎬佸簱鎴?header-only 宓屽叆閮藉彲浠ワ紱header-only 鍙伩鍏?DLL ABI锛屼絾浼氬鍔犲涓荤紪璇戞椂闂淬€?- 濡傛灉瀹夸富鍙敤涓€涓?TU 鍖呭惈 HTTP 澶达紝header-only 鍙锛涘鏋滃涓?TU 閮藉寘鍚紝寤鸿鐢ㄧ紪璇戠増 `tugmcp::http` 鎴栧彧鍦ㄤ竴涓?TU 瀹氫箟瀹炵幇銆?- 鏃犺鍝褰㈡€侊紝瀹夸富鐨勬墽琛屽櫒/UI 璋冨害/瀹夊叏閫昏緫浠嶇暀鍦ㄥ涓汇€?
+- 需要稳定 ABI 的 DLL/插件边界；
+- 消费者很多、编译时间敏感；
+- 需要隐藏实现/减少公共头暴露；
+- 需要可选依赖隔离（HTTP/TLS/schema）而不想用宏污染消费者；
+- 需要 pimpl 控制二进制兼容。
+
+这些情况下用静态库/编译库更合适；header-only 可作为附加分发形态。
+
+## 6. 推荐决策
+
+1. **core/protocol/stdio**：header-only 友好，优先支持。
+2. **HTTP/SSE**：独立 `transport/http.hpp`（仅声明，不含 cpp-httplib），可 header-only（实现位于 `detail/http_httplib.hpp`），也可编译成 `tugmcp::http`；不要让 `core.hpp` 传递 cpp-httplib。TLS 是 `tugmcp::http` 的构建开关（`TUGMCP_TLS`），不新增 target。编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 PRIVATE（OpenSSL 亦 PRIVATE，静态库经 `$<LINK_ONLY:>` 传递）；header-only 模式下这些定义才走 INTERFACE，且消费者必须在所有 TU 使用同一宏，只支持经 `tugmcp::http` target 消费。编译模式 `src/transport/*.cpp` 直接 include `httplib.h`，`detail/http_httplib.hpp` 为 header-only 专用；守卫含 `#ifndef TUGMCP_TLS_ENABLED` 检查。
+3. **schema**：独立可选头（jsoncons/Valijson/null），按需包含。
+4. **单头**：发布时生成 `tugmcp.hpp`，附带 SHA256 和生成脚本；开发时维护 split headers。
+5. **CI**：双 TU ODR 测试 + MSVC x64 / GCC / Clang + header-only/编译模式 + TLS on/off 各一遍。
+
+## 7. 验收标准
+
+完整测试分层见 [`testing.md`](./testing.md)；本节只列 header-only 特有验收项。
+
+- [ ] 两个 TU 同时 include 公共头，链接无重复符号。
+- [ ] `core.hpp` 不 include cpp-httplib/GUI 框架头；`http.hpp` 不进入 core 编译单元。
+- [ ] MSVC x64 与 GCC/Clang 各构建一个 echo server/client（TLS on/off 各一遍）。
+- [ ] header-only 与编译模式行为一致（同一测试集）。
+- [ ] 记录编译时间/二进制大小基线；单头生成可复现。
+- [ ] Windows 链接 `ws2_32`/`crypt32` 与 `TUGMCP_TLS` 开关的说明在 README/CMake target 中可见。
+- [ ] 同一进程内所有 TU 的 `CPPHTTPLIB_OPENSSL_SUPPORT` 定义一致（TLS on/off 不混用）。
+- [ ] `transport/http.hpp` 不 include 任何第三方头；TLS/构建模式切换不改变其声明。
+- [ ] `TUGMCP_HEADER_ONLY=ON` + `TUGMCP_ENABLE_LEGACY_SSE=ON` 必须 configure 失败（`FATAL_ERROR`）。
+
+## 8. 与宿主应用的关系
+
+- 宿主应用以静态库或 header-only 嵌入都可以；header-only 可避免 DLL ABI，但会增加宿主编译时间。
+- 如果宿主只用一个 TU 包含 HTTP 头，header-only 可行；如果多个 TU 都包含，建议用编译版 `tugmcp::http` 或只在一个 TU 定义实现。
+- 无论哪种形态，宿主的执行器/UI 调度/安全逻辑仍留在宿主。
+
 ## 9. 单头 artifact（发布用，与 `TUGMCP_HEADER_ONLY` 分离）
 
 - **源码权威**：`include/` split headers + `src/` 实现；单头只在发布时由 `tools/amalgamate.py` 生成，不手写、不提交为第二份实现。
 - **产物矩阵**：
   - `tugmcp.hpp`：core + stdio（nlohmann/json 作为外部依赖；Threads 链接）。
-  - `tugmcp_http.hpp`：上面的 + Streamable HTTP/SSE（cpp-httplib 外部依赖；TLS 变体按宏/单独产物；ws2_32/crypt32/OpenSSL）。
+  - `tugmcp_http.hpp`：core + stdio + Streamable HTTP/SSE（cpp-httplib 外部依赖；TLS 变体按宏/单独产物；ws2_32/crypt32/OpenSSL）。
   - schema（jsoncons/Valijson）与 legacy **不进入单头**；`TUGMCP_HEADER_ONLY + LEGACY` 继续 FATAL。
 - **消费方式**：恰好一个 TU `#define TUGMCP_IMPLEMENTATION` 后 include；其余 TU 只 include。`TUGMCP_HEADER_ONLY` CMake 模式仍不实现，单头 artifact 不依赖它。
 - **生成规则**：按公共头依赖排序；去掉项目内 include/`#pragma once`，保留第三方 include；实现段由 `src/**` 合并到 `#ifdef TUGMCP_IMPLEMENTATION`；处理匿名命名空间重名；输出确定性（无时间戳）。
 - **验收**：生成两次 SHA256 一致；双 TU ODR/链接；standalone consumer 行为测试；单头构建的 echo/fixture server 通过 MCP Inspector 与官方 conformance（2026/2025）；TLS 变体编译/链接 smoke。
 - **发布**：CI 生成到 `build/amalgamation/` 或 release 附件，附 `SHA256SUMS` 与第三方许可证说明；不进入源码树。
+

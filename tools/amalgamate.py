@@ -5,34 +5,82 @@ The split headers under ``include/`` and the implementation files under ``src/``
 remain the source of truth. This script only concatenates them:
 
 * public headers for the selected profile (dependency-sorted, de-duplicated);
-* the profile's internal implementation header;
+* the profile's internal implementation headers;
 * the profile's source files, wrapped in ``#ifdef TUGMCP_IMPLEMENTATION``.
 
-Project-local includes are removed after being resolved; system/third-party
-includes are hoisted to the top and de-duplicated. The output is deterministic:
-there are no timestamps and every list is processed in a stable order.
+Includes in declaration-section headers are hoisted/deduplicated. Includes in
+implementation-section files are emitted verbatim in place, so HTTP/TLS headers
+are never hoisted into the declaration prelude.
+
+The output is deterministic: there are no timestamps and every list is processed
+in a stable order.
 
 Usage:
     python tools/amalgamate.py --profile core --out build/amalgamation/tugmcp.hpp
-    python tools/amalgamate.py --profile core --check build/amalgamation/tugmcp.hpp
+    python tools/amalgamate.py --profile core --check build/amalgamation/tugmcp.hpp \
+        --hash-file tests/amalgamation/core.sha256
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple, TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_ROOT = ROOT / "include"
 PUBLIC_ROOT = INCLUDE_ROOT / "tugmcp"
 
-PROFILES: Dict[str, Dict[str, Sequence[str]]] = {
+# The exact nlohmann/json pin used by the split build (AGENTS.md).
+NLOHMANN_JSON_VERSION = "3.12.0"
+
+# Explicit allowlist for quoted third-party includes. Quoted includes that do
+# not resolve to a repo file must appear here, otherwise generation fails.
+QUOTED_INCLUDE_ALLOWLIST: Dict[str, str] = {
+    "nlohmann/json.hpp": "vendored nlohmann/json header",
+    "httplib.h": "vendored cpp-httplib header (implementation sections only)",
+}
+
+# Repo-relative implementation includes that are intentionally not part of a
+# profile's input set. Keep this empty unless a generated (non-merged) header is
+# deliberately consumed by an implementation file.
+IMPL_INCLUDE_IGNORE: Dict[str, str] = {}
+
+class Profile(TypedDict):
+    guard: str
+    display_name: str
+    public_headers: List[str]
+    internal_headers: List[str]
+    sources: List[str]
+    exclusions: Dict[str, str]
+
+
+EXCLUSIONS: Dict[str, Dict[str, str]] = {
     "core": {
+        "include/tugmcp/detail/http_httplib.hpp":
+            "HTTP implementation header; belongs to the H2 HTTP artifact",
+        "include/tugmcp/schema/jsoncons.hpp":
+            "optional jsoncons schema validator; not part of core",
+        "include/tugmcp/schema/null.hpp":
+            "test-only schema validator; not part of core",
+        "include/tugmcp/schema/valijson.hpp":
+            "optional Valijson schema validator; not part of core",
+        "include/tugmcp/transport/http.hpp":
+            "Streamable HTTP transport; belongs to the H2 HTTP artifact",
+        "include/tugmcp/transport/legacy_sse.hpp":
+            "legacy HTTP+SSE transport; excluded from single-header artifacts",
+    },
+}
+
+PROFILES: Dict[str, Profile] = {
+    "core": {
+        "guard": "TUGMCP_SINGLE_HEADER_CORE_HPP",
+        "display_name": "core + stdio",
         "public_headers": [
             "version.hpp",
             "error.hpp",
@@ -68,18 +116,44 @@ PROFILES: Dict[str, Dict[str, Sequence[str]]] = {
             "src/core/operation.cpp",
             "src/transport/stdio.cpp",
         ],
+        "exclusions": EXCLUSIONS["core"],
     },
 }
 
-HEADER_GUARD = "TUGMCP_SINGLE_HEADER_HPP"
 INCLUDE_RE = re.compile(r"^\s*#\s*include\s*([<\"])([^>\"]+)[>\"]\s*$")
 PRAGMA_ONCE_RE = re.compile(r"^\s*#\s*pragma\s+once\s*$")
 COND_START_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef)\b")
 COND_END_RE = re.compile(r"^\s*#\s*endif\b")
+ANON_NAMESPACE_RE = re.compile(r"\bnamespace\s*\{")
+CONTROL_KEYWORDS = {
+    "alignof",
+    "catch",
+    "const_cast",
+    "decltype",
+    "delete",
+    "dynamic_cast",
+    "for",
+    "if",
+    "new",
+    "noexcept",
+    "operator",
+    "reinterpret_cast",
+    "return",
+    "sizeof",
+    "static_cast",
+    "switch",
+    "throw",
+    "typeid",
+    "while",
+}
 
 
 class GenerationError(RuntimeError):
     pass
+
+
+def repo_relative(path: Path) -> str:
+    return path.resolve().relative_to(ROOT).as_posix()
 
 
 def normalize_lines(text: str) -> List[str]:
@@ -89,13 +163,23 @@ def normalize_lines(text: str) -> List[str]:
     return [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
 
 
-def resolve_project_include(name: str, including: Path) -> Path | None:
-    """Return the repo-local file for a project include, else ``None``.
+def normalized_file_sha256(path: Path) -> str:
+    lines = normalize_lines(path.read_text(encoding="utf-8"))
+    payload = "\n".join(lines).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
-    Quoted includes are always project includes; a quoted include that cannot be
-    resolved is an error (the caller reports it). Angle-bracket includes are
-    project includes only when they name a ``tugmcp/`` header.
-    """
+
+def provenance_marker(path: Path) -> List[str]:
+    return [
+        "// ===========================================================================",
+        f"// merged from: {repo_relative(path)}",
+        f"// normalized sha256: {normalized_file_sha256(path)}",
+        "// ===========================================================================",
+    ]
+
+
+def resolve_project_include(name: str, including: Path) -> Path | None:
+    """Return the repo-local file for a project include, else ``None``."""
     candidates: List[Path] = []
     if name.startswith("tugmcp/"):
         candidates.append(INCLUDE_ROOT / name)
@@ -135,8 +219,6 @@ def is_directive_only(block: Sequence[str]) -> bool:
     for line in block:
         stripped = line.strip()
         if continuation:
-            # Continuation line of a preprocessor directive: it may not start
-            # with '#'.
             continuation = stripped.endswith("\\")
             continue
         if not stripped:
@@ -163,12 +245,12 @@ def trim_blank_edges(lines: List[str]) -> List[str]:
 
 
 class Prelude:
-    """Collects hoisted includes while keeping deterministic first-seen order."""
+    """Collects hoisted declaration includes in deterministic first-seen order."""
 
     def __init__(self) -> None:
         self.plain: List[str] = []
         self.blocks: List[List[str]] = []
-        self._seen: set[str] = set()
+        self._seen: Set[str] = set()
 
     def add_include(self, line: str) -> None:
         canonical = " ".join(line.split())
@@ -178,7 +260,6 @@ class Prelude:
         self.plain.append(canonical)
 
     def add_block(self, lines: List[str], path: Path) -> None:
-        """Add a directive-only conditional block, filtering project includes."""
         kept: List[str] = []
         for line in lines:
             include = INCLUDE_RE.match(line)
@@ -190,7 +271,13 @@ class Prelude:
                         f"{path}: project include inside a hoisted conditional "
                         f"block is not supported: {line.strip()}"
                     )
-                if include.group(1) == '"' or name.startswith("tugmcp/"):
+                if include.group(1) == '"':
+                    if name not in QUOTED_INCLUDE_ALLOWLIST:
+                        raise GenerationError(
+                            f"{path}: unresolved quoted include {line.strip()}; "
+                            "add it to QUOTED_INCLUDE_ALLOWLIST if it is external"
+                        )
+                elif name.startswith("tugmcp/"):
                     raise GenerationError(
                         f"{path}: unresolved project include {line.strip()}"
                     )
@@ -212,10 +299,10 @@ class Prelude:
         return lines
 
 
-def process_file(
+def process_declaration_file(
     path: Path, prelude: Prelude
 ) -> Tuple[List[str], List[Path]]:
-    """Remove project includes/``#pragma once`` and return repo dependencies."""
+    """Strip project includes/``#pragma once`` and hoist external includes."""
     if not path.is_file():
         raise GenerationError(f"input file not found: {path}")
     lines = normalize_lines(path.read_text(encoding="utf-8"))
@@ -253,7 +340,16 @@ def process_file(
                 deps.append(resolved)
                 index += 1
                 continue
-            if include.group(1) == '"' or name.startswith("tugmcp/"):
+            if include.group(1) == '"':
+                if name not in QUOTED_INCLUDE_ALLOWLIST:
+                    raise GenerationError(
+                        f"{path}: unresolved quoted include {line.strip()}; "
+                        "add it to QUOTED_INCLUDE_ALLOWLIST if it is external"
+                    )
+                prelude.add_include(line.strip())
+                index += 1
+                continue
+            if name.startswith("tugmcp/"):
                 raise GenerationError(
                     f"{path}: unresolved project include {line.strip()}"
                 )
@@ -276,7 +372,128 @@ def process_file(
     return trim_blank_edges(body), deps
 
 
-def public_header_order(profile: Dict[str, Sequence[str]]) -> List[Path]:
+def process_implementation_file(
+    path: Path,
+    input_paths: Set[Path],
+    ignored_relative_paths: Set[str],
+) -> Tuple[List[str], List[Path]]:
+    """Validate implementation includes and keep external includes in place."""
+    if not path.is_file():
+        raise GenerationError(f"input file not found: {path}")
+    lines = normalize_lines(path.read_text(encoding="utf-8"))
+    body: List[str] = []
+    deps: List[Path] = []
+
+    for line in lines:
+        if PRAGMA_ONCE_RE.match(line):
+            continue
+
+        include = INCLUDE_RE.match(line)
+        if include:
+            name = include.group(2)
+            resolved = resolve_project_include(name, path)
+            if resolved is not None:
+                relative = repo_relative(resolved)
+                if resolved not in input_paths and relative not in ignored_relative_paths:
+                    raise GenerationError(
+                        f"{path}: implementation include {line.strip()} resolves "
+                        f"to {relative}, which is not a profile input and is not "
+                        "in IMPL_INCLUDE_IGNORE"
+                    )
+                deps.append(resolved)
+                continue
+
+            if include.group(1) == '"':
+                if name not in QUOTED_INCLUDE_ALLOWLIST:
+                    raise GenerationError(
+                        f"{path}: unresolved quoted include {line.strip()}; "
+                        "add it to QUOTED_INCLUDE_ALLOWLIST if it is external"
+                    )
+                body.append(line)
+                continue
+            if name.startswith("tugmcp/"):
+                raise GenerationError(
+                    f"{path}: unresolved project include {line.strip()}"
+                )
+            # System/third-party angle include: emit verbatim in place.
+            body.append(line)
+            continue
+
+        body.append(line)
+
+    return trim_blank_edges(body), deps
+
+
+def profile_input_paths(profile: Profile) -> Tuple[Set[Path], Set[str]]:
+    paths: Set[Path] = set()
+    for name in profile["public_headers"]:
+        paths.add((PUBLIC_ROOT / name).resolve())
+    for relative in list(profile["internal_headers"]) + list(profile["sources"]):
+        paths.add((ROOT / relative).resolve())
+    relative_paths = {repo_relative(path) for path in paths}
+    return paths, relative_paths
+
+
+def validate_profile_completeness(
+    profile_name: str, profile: Profile
+) -> None:
+    exclusions: Dict[str, str] = dict(profile.get("exclusions", {}))
+    for relative, reason in exclusions.items():
+        if not reason:
+            raise GenerationError(
+                f"profile {profile_name}: exclusion {relative} has no reason"
+            )
+
+    expected_headers = {
+        repo_relative(path) for path in PUBLIC_ROOT.rglob("*.hpp")
+    }
+    expected_sources = {
+        repo_relative(path) for path in (ROOT / "src" / "core").glob("*.cpp")
+    }
+    stdio = ROOT / "src" / "transport" / "stdio.cpp"
+    if stdio.is_file():
+        expected_sources.add(repo_relative(stdio))
+    expected_all = expected_headers | expected_sources
+
+    unknown_exclusions = set(exclusions) - expected_all
+    if unknown_exclusions:
+        raise GenerationError(
+            f"profile {profile_name}: exclusions reference unknown files: "
+            f"{sorted(unknown_exclusions)}"
+        )
+
+    profile_headers = {
+        f"include/tugmcp/{name}" for name in profile["public_headers"]
+    }
+    missing_header_inputs = profile_headers - expected_headers
+    if missing_header_inputs:
+        raise GenerationError(
+            f"profile {profile_name}: public header inputs are missing: "
+            f"{sorted(missing_header_inputs)}"
+        )
+
+    missing_headers = expected_headers - profile_headers - set(exclusions)
+    if missing_headers:
+        raise GenerationError(
+            f"profile {profile_name}: public headers are neither merged nor "
+            f"excluded: {sorted(missing_headers)}"
+        )
+
+    missing_sources = (
+        expected_sources - set(profile["sources"]) - set(exclusions)
+    )
+    if missing_sources:
+        raise GenerationError(
+            f"profile {profile_name}: sources are neither merged nor excluded: "
+            f"{sorted(missing_sources)}"
+        )
+
+    for relative in list(profile["internal_headers"]) + list(profile["sources"]):
+        if not (ROOT / relative).is_file():
+            raise GenerationError(f"profile input not found: {relative}")
+
+
+def public_header_order(profile: Profile) -> List[Path]:
     names = list(profile["public_headers"])
     paths = {name: PUBLIC_ROOT / name for name in names}
     for name, path in paths.items():
@@ -285,7 +502,7 @@ def public_header_order(profile: Dict[str, Sequence[str]]) -> List[Path]:
 
     dependencies: Dict[str, List[str]] = {}
     for name, path in paths.items():
-        _, deps = process_file(path, Prelude())
+        _, deps = process_declaration_file(path, Prelude())
         local_deps: List[str] = []
         for dep in deps:
             try:
@@ -303,8 +520,8 @@ def public_header_order(profile: Dict[str, Sequence[str]]) -> List[Path]:
         dependencies[name] = local_deps
 
     result: List[str] = []
-    visiting: set[str] = set()
-    done: set[str] = set()
+    visiting: Set[str] = set()
+    done: Set[str] = set()
 
     def visit(name: str) -> None:
         if name in done:
@@ -323,10 +540,183 @@ def public_header_order(profile: Dict[str, Sequence[str]]) -> List[Path]:
     return [paths[name] for name in result]
 
 
-def read_text(path: Path) -> str:
+def mask_cpp(text: str) -> str:
+    """Blank comments and string/char literal contents, preserving newlines."""
+    chars = list(text)
+    index = 0
+    size = len(text)
+    state = "normal"
+    while index < size:
+        char = text[index]
+        if state == "normal":
+            if char == "/" and index + 1 < size and text[index + 1] == "/":
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                state = "line"
+                continue
+            if char == "/" and index + 1 < size and text[index + 1] == "*":
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                state = "block"
+                continue
+            if char == '"':
+                chars[index] = " "
+                index += 1
+                state = "string"
+                continue
+            if char == "'":
+                chars[index] = " "
+                index += 1
+                state = "char"
+                continue
+            index += 1
+            continue
+
+        if state == "line":
+            if char == "\n":
+                state = "normal"
+            else:
+                chars[index] = " "
+            index += 1
+            continue
+
+        if state == "block":
+            if char == "*" and index + 1 < size and text[index + 1] == "/":
+                chars[index] = chars[index + 1] = " "
+                index += 2
+                state = "normal"
+                continue
+            if char != "\n":
+                chars[index] = " "
+            index += 1
+            continue
+
+        # string/char literal
+        quote = '"' if state == "string" else "'"
+        if char == "\\":
+            chars[index] = " "
+            if index + 1 < size and text[index + 1] != "\n":
+                chars[index + 1] = " "
+            index += 2
+            continue
+        if char == quote:
+            chars[index] = " "
+            index += 1
+            state = "normal"
+            continue
+        if char != "\n":
+            chars[index] = " "
+        index += 1
+
+    return "".join(chars)
+
+
+def anonymous_top_level_text(text: str) -> str:
+    """Return only declarations directly inside anonymous namespaces."""
+    masked = mask_cpp(text)
+    anon_opens = {match.end() - 1 for match in ANON_NAMESPACE_RE.finditer(masked)}
+    output: List[str] = []
+    stack: List[bool] = []
+    for index, char in enumerate(masked):
+        keep = bool(stack) and stack[-1]
+        if char == "{":
+            if keep:
+                # A function/class/initializer body inside the anonymous
+                # namespace: keep the preceding declaration, drop the body.
+                output.append(";")
+            else:
+                output.append(" ")
+            stack.append(index in anon_opens)
+            continue
+        if char == "}":
+            if stack:
+                stack.pop()
+            output.append(" ")
+            continue
+        if char == "\n":
+            output.append("\n")
+            continue
+        output.append(char if keep else " ")
+    return "".join(output)
+
+
+def scan_anonymous_names(path: Path) -> Set[str]:
     if not path.is_file():
         raise GenerationError(f"input file not found: {path}")
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    extracted = anonymous_top_level_text(text)
+    names: Set[str] = set()
+
+    for statement in extracted.split(";"):
+        statement = " ".join(statement.split())
+        if not statement or statement.startswith("#"):
+            continue
+
+        type_match = re.match(
+            r"^(?:template\s*<[^>]*>\s*)?"
+            r"(?:struct|class|union|enum(?:\s+class)?)\s+([A-Za-z_]\w*)",
+            statement,
+        )
+        if type_match:
+            names.add(type_match.group(1))
+            continue
+
+        using_match = re.match(
+            r"^(?:template\s*<[^>]*>\s*)?using\s+([A-Za-z_]\w*)\s*=",
+            statement,
+        )
+        if using_match:
+            names.add(using_match.group(1))
+            continue
+
+        typedef_match = re.match(r"^typedef\b", statement)
+        if typedef_match:
+            match = re.search(r"([A-Za-z_]\w*)\s*$", statement)
+            if match:
+                names.add(match.group(1))
+            continue
+
+        first_paren = statement.find("(")
+        first_equal = statement.find("=")
+        if first_paren != -1 and (first_equal == -1 or first_paren < first_equal):
+            match = re.search(
+                r"([A-Za-z_]\w*)\s*\(", statement[: first_paren + 1]
+            )
+            if match and match.group(1) not in CONTROL_KEYWORDS:
+                names.add(match.group(1))
+            continue
+
+        match = re.search(r"([A-Za-z_]\w*)\s*=", statement)
+        if match:
+            names.add(match.group(1))
+            continue
+
+        match = re.search(r"([A-Za-z_]\w*)\s*$", statement)
+        if match and match.group(1) not in CONTROL_KEYWORDS:
+            names.add(match.group(1))
+
+    return names
+
+
+def check_anonymous_collisions(entries: Sequence[Tuple[str, Path]]) -> None:
+    owners: Dict[str, Set[str]] = {}
+    for label, path in entries:
+        for name in scan_anonymous_names(path):
+            owners.setdefault(name, set()).add(label)
+
+    collisions = {
+        name: sorted(labels)
+        for name, labels in owners.items()
+        if len(labels) > 1
+    }
+    if collisions:
+        details = "; ".join(
+            f"{name} in {', '.join(labels)}"
+            for name, labels in sorted(collisions.items())
+        )
+        raise GenerationError(
+            "anonymous-namespace name collision across merged files: " + details
+        )
 
 
 def generate(profile_name: str) -> str:
@@ -340,38 +730,56 @@ def generate(profile_name: str) -> str:
         raise GenerationError(
             f"unknown profile '{profile_name}' (available: {known})"
         )
+
     profile = PROFILES[profile_name]
+    validate_profile_completeness(profile_name, profile)
+    input_paths, input_relative_paths = profile_input_paths(profile)
+
+    collision_entries: List[Tuple[str, Path]] = []
+    for relative in list(profile["internal_headers"]) + list(profile["sources"]):
+        collision_entries.append((relative, ROOT / relative))
+    check_anonymous_collisions(collision_entries)
+
     prelude = Prelude()
     declarations: List[str] = []
     implementation: List[str] = []
 
     for path in public_header_order(profile):
-        body, _ = process_file(path, prelude)
+        body, _ = process_declaration_file(path, prelude)
         if body:
             if declarations:
                 declarations.append("")
+            declarations.extend(provenance_marker(path))
             declarations.extend(body)
 
     for relative in profile["internal_headers"]:
         path = ROOT / relative
-        body, _ = process_file(path, prelude)
+        body, _ = process_implementation_file(
+            path, input_paths, set(IMPL_INCLUDE_IGNORE)
+        )
         if body:
             if implementation:
                 implementation.append("")
+            implementation.extend(provenance_marker(path))
             implementation.extend(body)
 
     for relative in profile["sources"]:
         path = ROOT / relative
-        body, _ = process_file(path, prelude)
+        body, _ = process_implementation_file(
+            path, input_paths, set(IMPL_INCLUDE_IGNORE)
+        )
         if body:
             if implementation:
                 implementation.append("")
+            implementation.extend(provenance_marker(path))
             implementation.extend(body)
 
+    guard = str(profile["guard"])
+    display_name = str(profile["display_name"])
     banner = [
         "// Generated by tools/amalgamate.py; do not edit.",
         "//",
-        "// tugmcp single-header release artifact: core + stdio.",
+        f"// tugmcp single-header release artifact: {display_name}.",
         "//",
         "// This header is a build artifact generated from the split headers in",
         "// include/ and the implementation in src/. The split sources remain the",
@@ -381,15 +789,17 @@ def generate(profile_name: str) -> str:
         "//   * Define TUGMCP_IMPLEMENTATION in exactly one translation unit before",
         "//     including this header. Include it without the macro everywhere else.",
         "//   * Link Threads::Threads (std::thread, std::mutex, ...).",
-        "//   * nlohmann/json is an external dependency: put <nlohmann/json.hpp> on",
-        "//     the include path. It is not embedded in this artifact.",
+        f"//   * nlohmann/json is an external dependency pinned at "
+        f"{NLOHMANN_JSON_VERSION}; put",
+        "//     <nlohmann/json.hpp> on the include path. It is not embedded.",
         "//   * This artifact intentionally excludes HTTP/SSE, legacy transports and",
         "//     schema validator backends.",
         "//",
+        f"// Guard: {guard}",
         f"// Profile: {profile_name}",
         "",
-        f"#ifndef {HEADER_GUARD}",
-        f"#define {HEADER_GUARD}",
+        f"#ifndef {guard}",
+        f"#define {guard}",
         "",
     ]
 
@@ -413,7 +823,7 @@ def generate(profile_name: str) -> str:
             "",
             "#endif // TUGMCP_IMPLEMENTATION",
             "",
-            f"#endif // {HEADER_GUARD}",
+            f"#endif // {guard}",
             "",
         ]
     )
@@ -422,6 +832,34 @@ def generate(profile_name: str) -> str:
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def read_recorded_hash(path: Path) -> str:
+    if not path.is_file():
+        raise GenerationError(f"recorded hash file not found: {path}")
+    first = path.read_text(encoding="utf-8").split()
+    if not first or not re.fullmatch(r"[0-9a-fA-F]{64}", first[0]):
+        raise GenerationError(f"recorded hash file is malformed: {path}")
+    return first[0].lower()
+
+
+def atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -437,25 +875,56 @@ def main(argv: Iterable[str] | None = None) -> int:
         metavar="PATH",
         help="regenerate and compare byte-for-byte with PATH",
     )
+    parser.add_argument(
+        "--hash-file",
+        type=Path,
+        default=None,
+        help=(
+            "recorded SHA256 file; requires --check and is verified "
+            "independently (auto-detected at tests/amalgamation/<profile>.sha256)"
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.hash_file is not None and args.check is None:
+        parser.error("--hash-file requires --check")
+
+    hash_file = args.hash_file
+    if hash_file is None and args.check is not None:
+        candidate = ROOT / "tests" / "amalgamation" / f"{args.profile}.sha256"
+        if candidate.is_file():
+            hash_file = candidate
 
     try:
         generated = generate(args.profile)
         payload = generated.encode("utf-8")
+        generated_hash = sha256(payload)
+        expected_hash = (
+            read_recorded_hash(hash_file)
+            if hash_file is not None
+            else None
+        )
     except GenerationError as error:
         print(f"amalgamate: error: {error}", file=sys.stderr)
         return 2
 
     if args.out is not None:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_bytes(payload)
+        atomic_write(args.out, payload)
         print(
             f"amalgamate: wrote {args.out} ({len(payload)} bytes, "
-            f"sha256 {sha256(payload)})"
+            f"sha256 {generated_hash})"
         )
         return 0
 
     assert args.check is not None
+    if expected_hash is not None and expected_hash != generated_hash:
+        print(
+            "amalgamate: error: generated hash does not match the recorded hash\n"
+            f"  recorded: {expected_hash}\n"
+            f"  generated: {generated_hash}",
+            file=sys.stderr,
+        )
+        return 1
     if not args.check.is_file():
         print(f"amalgamate: error: check target not found: {args.check}",
               file=sys.stderr)
@@ -466,14 +935,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             "amalgamate: error: generated header is not up to date\n"
             f"  existing: {args.check} ({len(existing)} bytes, "
             f"sha256 {sha256(existing)})\n"
-            f"  expected: {len(payload)} bytes, sha256 {sha256(payload)}",
+            f"  expected: {len(payload)} bytes, sha256 {generated_hash}",
             file=sys.stderr,
         )
         return 1
     print(
         f"amalgamate: {args.check} is up to date "
-        f"({len(payload)} bytes, sha256 {sha256(payload)})"
+        f"({len(payload)} bytes, sha256 {generated_hash})"
     )
+    if expected_hash is not None:
+        print(f"amalgamate: recorded hash matches ({expected_hash})")
     return 0
 
 

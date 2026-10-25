@@ -98,6 +98,21 @@ if(TUGMCP_WITH_HTTP)
   endif()
 endif()
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME amalgamation.core
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/run_tests.py
+      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp.hpp
+      --hash-file ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/core.sha256
+      --json-include ${PROJECT_SOURCE_DIR}/3rd/nlohmann_json
+      --build-dir ${CMAKE_CURRENT_BINARY_DIR}/amalgamation-build)
+  set_tests_properties(amalgamation.core PROPERTIES
+    LABELS amalgamation
+    TIMEOUT 600
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
+
 if(TUGMCP_CONFORMANCE)
   add_executable(tugmcp_conformance_server conformance/fixture_server.cpp)
   target_link_libraries(tugmcp_conformance_server PRIVATE

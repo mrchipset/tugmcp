@@ -19,7 +19,7 @@ constexpr int kCodecMaxDepth = 256;
 
 // Strict UTF-8 validator: rejects overlong encodings, surrogates and code
 // points above U+10FFFF. The JSON parser itself does not validate UTF-8.
-bool isValidUtf8(std::string_view text) noexcept {
+bool codecIsValidUtf8(std::string_view text) noexcept {
   const auto* bytes = reinterpret_cast<const unsigned char*>(text.data());
   const std::size_t size = text.size();
   std::size_t index = 0;
@@ -198,11 +198,11 @@ bool hasOnlyFiniteNumbers(const Json& value) {
 
 bool hasOnlyValidUtf8Strings(const Json& value) {
   if (value.is_string()) {
-    return isValidUtf8(value.get_ref<const std::string&>());
+    return codecIsValidUtf8(value.get_ref<const std::string&>());
   }
   if (value.is_object()) {
     for (auto it = value.begin(); it != value.end(); ++it) {
-      if (!isValidUtf8(it.key()) || !hasOnlyValidUtf8Strings(it.value())) {
+      if (!codecIsValidUtf8(it.key()) || !hasOnlyValidUtf8Strings(it.value())) {
         return false;
       }
     }
@@ -234,7 +234,7 @@ Result<std::string> internalEncodeError(std::string message) {
 } // namespace
 
 Result<Json> parseStrict(std::string_view raw) {
-  if (!isValidUtf8(raw)) {
+  if (!codecIsValidUtf8(raw)) {
     return Result<Json>::failure(
         McpError::make(ErrorCode::ParseError, "invalid UTF-8"));
   }

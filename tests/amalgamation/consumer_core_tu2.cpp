@@ -2,7 +2,10 @@
 //
 // It intentionally does NOT define TUGMCP_IMPLEMENTATION. The inline/public
 // declarations are used here; implementation symbols resolve to TU1.
-#include "tugmcp.hpp"
+#ifndef TUGMCP_AMALGAMATION_HEADER_NAME
+#error "TUGMCP_AMALGAMATION_HEADER_NAME must name the generated header"
+#endif
+#include TUGMCP_AMALGAMATION_HEADER_NAME
 
 #include <cstdint>
 #include <string>
