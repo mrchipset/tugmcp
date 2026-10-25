@@ -23,8 +23,8 @@ namespace mcp {
 namespace v1 {
 namespace {
 
-constexpr const char* kWire2026 = "2026-07-28";
-constexpr const char* kWire2025 = "2025-11-25";
+constexpr const char* kDispatcherWire2026 = "2026-07-28";
+constexpr const char* kDispatcherWire2025 = "2025-11-25";
 constexpr const char* kMetaProtocolVersion =
     "io.modelcontextprotocol/protocolVersion";
 constexpr const char* kMetaClientCapabilities =
@@ -938,9 +938,10 @@ std::optional<Message> Dispatcher::dispatch(
   }
 
   const bool notification = request.kind == MessageKind::Notification;
-  const std::string version =
-      protocolVersion.empty() ? std::string(kWire2025) : protocolVersion;
-  const bool is2026 = version == kWire2026;
+  const std::string version = protocolVersion.empty()
+                                 ? std::string(kDispatcherWire2025)
+                                 : protocolVersion;
+  const bool is2026 = version == kDispatcherWire2026;
 
   Message response;
   response.kind = MessageKind::Response;
@@ -982,7 +983,7 @@ std::optional<Message> Dispatcher::dispatch(
             ErrorCode::MethodNotFound,
             "method not found: " + request.method);
       } else if (request.method == "initialize") {
-      std::string requested = kWire2025;
+      std::string requested = kDispatcherWire2025;
       if (request.params.is_object() &&
           request.params.contains("protocolVersion")) {
         const Json& version_value = request.params.at("protocolVersion");
@@ -1003,8 +1004,8 @@ std::optional<Message> Dispatcher::dispatch(
       if (!response.error.has_value()) {
         Json result = completeResult(is2026);
         result["protocolVersion"] = requested;
-        result["capabilities"] =
-            capabilities(config_, resources_, prompts_, requested == kWire2026);
+        result["capabilities"] = capabilities(
+            config_, resources_, prompts_, requested == kDispatcherWire2026);
         result["serverInfo"] = serverInfo(config_);
         if (!config_.instructions.empty()) {
           result["instructions"] = config_.instructions;

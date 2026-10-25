@@ -15,7 +15,7 @@ namespace mcp {
 namespace v1 {
 namespace {
 
-constexpr int kMaxDepth = 256;
+constexpr int kCodecMaxDepth = 256;
 
 // Strict UTF-8 validator: rejects overlong encodings, surrogates and code
 // points above U+10FFFF. The JSON parser itself does not validate UTF-8.
@@ -83,7 +83,7 @@ bool isValidUtf8(std::string_view text) noexcept {
 }
 
 // SAX handler that rejects duplicate object keys at any depth and aborts on
-// nesting deeper than kMaxDepth before the DOM parser can recurse.
+// nesting deeper than kCodecMaxDepth before the DOM parser can recurse.
 class StrictSax : public nlohmann::json_sax<Json> {
 public:
   using number_integer_t = nlohmann::json_sax<Json>::number_integer_t;
@@ -113,7 +113,7 @@ public:
   bool binary(binary_t&) override { return true; }
 
   bool start_object(std::size_t) override {
-    if (++depth_ > kMaxDepth) {
+    if (++depth_ > kCodecMaxDepth) {
       too_deep_ = true;
       return false;
     }
@@ -144,7 +144,7 @@ public:
   }
 
   bool start_array(std::size_t) override {
-    if (++depth_ > kMaxDepth) {
+    if (++depth_ > kCodecMaxDepth) {
       too_deep_ = true;
       return false;
     }

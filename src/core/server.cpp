@@ -23,7 +23,7 @@ bool isRouteGone(const Status& status) {
          status.error.data.value("reason", std::string{}) == "route_not_found";
 }
 
-const char* listKindName(ListKind kind) {
+const char* serverListKindName(ListKind kind) {
   switch (kind) {
   case ListKind::Tools:
     return "tools";
