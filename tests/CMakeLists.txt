@@ -112,6 +112,16 @@ if(Python3_Interpreter_FOUND)
     TIMEOUT 600
     RUN_SERIAL TRUE
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
+  add_test(NAME amalgamation.release
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/run_release.py
+      --release-dir ${CMAKE_BINARY_DIR}/amalgamation/release)
+  set_tests_properties(amalgamation.release PROPERTIES
+    LABELS amalgamation
+    TIMEOUT 300
+    RUN_SERIAL TRUE
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 endif()
 
 # External Inspector + conformance verification of the HTTP/HTTP-TLS artifacts.

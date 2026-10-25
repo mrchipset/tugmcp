@@ -9,7 +9,7 @@ option(TUGMCP_BUILD_TESTS "Build tugmcp test targets" ON)
 option(TUGMCP_BUILD_EXAMPLES "Build tugmcp examples" ON)
 option(TUGMCP_WITH_HTTP "Build the Streamable HTTP transport" ON)
 option(TUGMCP_TLS "Enable TLS support (OpenSSL >= 3.0)" OFF)
-option(TUGMCP_HEADER_ONLY "Consume the library header-only (not implemented yet)" OFF)
+option(TUGMCP_HEADER_ONLY "Consume split headers header-only (not implemented; FATAL)" OFF)
 option(TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION
   "Require single-header external Inspector/conformance tests (fails loudly if prerequisites are missing)" ON)
 option(TUGMCP_USE_SYSTEM_DEPS "Use system packages instead of 3rd/ (not implemented yet)" OFF)
@@ -48,6 +48,36 @@ if(TUGMCP_TLS AND NOT TUGMCP_WITH_HTTP)
 endif()
 
 find_package(Threads REQUIRED)
+
+# Optional single-header release tooling. These targets are never part of ALL
+# and need only Python 3 + the vendored sources (no network access).
+set(TUGMCP_AMALGAMATION_RELEASE_DIR
+  "${CMAKE_BINARY_DIR}/amalgamation/release"
+  CACHE PATH "Output directory for the packaged single-header release")
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_custom_target(amalgamate
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+      --profile core
+      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp.hpp
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+      --profile http
+      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http.hpp
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate.py
+      --profile http --tls
+      --out ${CMAKE_BINARY_DIR}/amalgamation/tugmcp_http_tls.hpp
+    COMMENT "Generating core/HTTP/TLS single-header artifacts"
+    VERBATIM)
+  add_custom_target(amalgamate-release
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/package_amalgamation.py
+      --release-dir ${TUGMCP_AMALGAMATION_RELEASE_DIR}
+    COMMENT "Packaging single-header release artifacts"
+    VERBATIM)
+endif()
 
 if(TUGMCP_VERIFY_3RD_HASHES)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_hashes.cmake)

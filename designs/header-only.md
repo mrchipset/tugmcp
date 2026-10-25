@@ -2,7 +2,9 @@
 
 > 问题：`tugmcp` 是否也可以做成 header-only？是否要增加很多工作量？
 >
-> 结论：**可以**。默认构建产物为静态库，同时支持以 header-only 方式消费（`TUGMCP_HEADER_ONLY=ON` 显式开启），而不是一开始就做一个巨大的单头文件。工作量增加有限（设计阶段约 +15–25%），主要成本在编译时间、ODR 纪律和 HTTP 依赖的传递，不在协议逻辑本身。
+> 结论：**可以**。默认构建产物为静态库；**单头发布产物已支持**（`tugmcp.hpp` / `tugmcp_http.hpp` / `tugmcp_http_tls.hpp`），而不是一开始就做一个巨大的单头文件。工作量增加有限（设计阶段约 +15–25%），主要成本在编译时间、ODR 纪律和 HTTP 依赖的传递，不在协议逻辑本身。
+>
+> **当前状态（2026-10-25）**：单头 release artifacts 已支持并有生成/打包/哈希/外部验证；**split-header `TUGMCP_HEADER_ONLY=ON` 的 CMake INTERFACE 模式未实现，根 `CMakeLists.txt` 直接 `FATAL_ERROR`**。不要把两者混为一谈：消费单头不需要、也不能开启 `TUGMCP_HEADER_ONLY`。详见 [`docs/amalgamation.md`](../docs/amalgamation.md)。
 
 ## 1. 为什么可行
 
@@ -20,7 +22,7 @@
 
 ## 2. 推荐形态
 
-**默认构建产物为静态库；同时支持以 header-only 方式消费（`TUGMCP_HEADER_ONLY=ON` 显式开启）。**
+**默认构建产物为静态库。发布的 header-only 形态是生成的单头 artifact；split-header 的 `TUGMCP_HEADER_ONLY` CMake 模式尚未实现（FATAL）。**
 
 ```text
 include/tugmcp/
@@ -40,9 +42,9 @@ include/tugmcp/
 
 - 公共头只允许 include nlohmann/json（`Json` 暴露）与对应可选 schema target 的第三方头；`core.hpp`/`server.hpp`/`client.hpp`/`transport/http.hpp` 永不 include cpp-httplib/GUI 框架头。
 - `detail/http_httplib.hpp` 才引入 cpp-httplib；不使用 HTTP 的消费者不付这份编译成本。
-- 单头 `tugmcp.hpp` 由脚本把需要的头按顺序合并生成，并做双 TU/ODR 测试；不要手工维护两份实现。
-- `TUGMCP_HEADER_ONLY` 是 **CMake option**：ON 时相关 target 变为 INTERFACE（不编译 `src/`）。
-- `TUGMCP_IMPLEMENTATION` 是 **宏**：header-only / amalgamation 场景的单 TU 实现宏。
+- 单头 `tugmcp.hpp`（以及 `tugmcp_http.hpp`/`tugmcp_http_tls.hpp`）由脚本把需要的头按顺序合并生成，并做双 TU/ODR 测试；不要手工维护两份实现。
+- `TUGMCP_HEADER_ONLY` 是 **CMake option，但 split-header 模式未实现**：当前 ON 即 `FATAL_ERROR`。单头 artifact 不读取此开关。
+- `TUGMCP_IMPLEMENTATION` 是 **宏**：单头场景的单 TU 实现宏，不是编译模式开关。
 
 ## 3. 需要额外做的工作
 
@@ -57,9 +59,9 @@ include/tugmcp/
 | ABI/实现隐藏 | header-only 暴露实现；DLL/插件场景不适合 | 设计取舍 |
 | 测试矩阵 | MSVC/GCC/Clang、单 TU/多 TU、header-only/编译模式、TLS on/off | 中 |
 
-header-only 下 `CPPHTTPLIB_OPENSSL_SUPPORT` 无法在链接期检测跨 TU 不一致，因此只支持经 `tugmcp::http` target 消费；编译模式下该宏为 PRIVATE，由 `detail/http_httplib.hpp` 的 `#error` 守卫兜底。
+单头 artifact 下 `CPPHTTPLIB_OPENSSL_SUPPORT` 无法在链接期检测跨 TU 不一致，因此消费方必须对所有看到 `httplib.h` 的 TU 使用同一产物/宏；编译模式下该宏为 PRIVATE，由 `detail/http_httplib.hpp` 的 `#error` 守卫兜底。
 
-`tugmcp::tests` 是 INTERFACE helper 库（fake transport / conformance helpers / fixture 头，传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）是独立 target，**始终编译**；`TUGMCP_HEADER_ONLY` 只影响库 target。
+`tugmcp::tests` 是 INTERFACE helper 库（fake transport / conformance helpers / fixture 头，传播 `tugmcp_3rd_doctest`）；测试可执行文件（`tugmcp_unit_tests` 等）是独立 target，**始终编译**。split-header 的 `TUGMCP_HEADER_ONLY` 模式尚未实现，因此目前不存在“只影响库 target”的 INTERFACE 切换。
 
 ## 4. 工量评估
 
@@ -80,41 +82,49 @@ header-only 下 `CPPHTTPLIB_OPENSSL_SUPPORT` 无法在链接期检测跨 TU 不�
 
 ## 6. 推荐决策
 
-1. **core/protocol/stdio**：header-only 友好，优先支持。
-2. **HTTP/SSE**：独立 `transport/http.hpp`（仅声明，不含 cpp-httplib），可 header-only（实现位于 `detail/http_httplib.hpp`），也可编译成 `tugmcp::http`；不要让 `core.hpp` 传递 cpp-httplib。TLS 是 `tugmcp::http` 的构建开关（`TUGMCP_TLS`），不新增 target。编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 PRIVATE（OpenSSL 亦 PRIVATE，静态库经 `$<LINK_ONLY:>` 传递）；header-only 模式下这些定义才走 INTERFACE，且消费者必须在所有 TU 使用同一宏，只支持经 `tugmcp::http` target 消费。编译模式 `src/transport/*.cpp` 直接 include `httplib.h`，`detail/http_httplib.hpp` 为 header-only 专用；守卫含 `#ifndef TUGMCP_TLS_ENABLED` 检查。
+1. **core/protocol/stdio**：单头发布友好，优先支持。
+2. **HTTP/SSE**：独立 `transport/http.hpp`（仅声明，不含 cpp-httplib）；单头 artifact 通过 `detail/http_httplib.hpp` 合并实现，也可编译成 `tugmcp::http`；不要让 `core.hpp` 传递 cpp-httplib。TLS 是 `tugmcp::http` 的构建开关（`TUGMCP_TLS`），不新增 target。编译模式下 `CPPHTTPLIB_OPENSSL_SUPPORT`/`TUGMCP_TLS_ENABLED` 为 PRIVATE（OpenSSL 亦 PRIVATE，静态库经 `$<LINK_ONLY:>` 传递）；单头模式下这些定义由 TLS artifact 自身在实现段发出，消费者必须在所有 TU 使用同一 artifact/宏。编译模式 `src/transport/*.cpp` 直接 include `httplib.h`，`detail/http_httplib.hpp` 供单头生成使用；守卫含 `#ifndef TUGMCP_TLS_ENABLED` 检查。
 3. **schema**：独立可选头（jsoncons/Valijson/null），按需包含。
-4. **单头**：发布时生成 `tugmcp.hpp`，附带 SHA256 和生成脚本；开发时维护 split headers。
-5. **CI**：双 TU ODR 测试 + MSVC x64 / GCC / Clang + header-only/编译模式 + TLS on/off 各一遍。
+4. **单头**：发布时生成 `tugmcp.hpp`/`tugmcp_http.hpp`/`tugmcp_http_tls.hpp`，附带 `SHA256SUMS`、`NOTICE`/`README` 与生成/打包脚本；开发时维护 split headers。split-header `TUGMCP_HEADER_ONLY` 模式仍延后。
+5. **CI**：双 TU ODR 测试 + MSVC x64 / GCC / Clang + 编译模式 + TLS on/off 各一遍；单头 artifact 另有 Inspector/conformance 外部验证。
 
 ## 7. 验收标准
 
 完整测试分层见 [`testing.md`](./testing.md)；本节只列 header-only 特有验收项。
 
-- [ ] 两个 TU 同时 include 公共头，链接无重复符号。
-- [ ] `core.hpp` 不 include cpp-httplib/GUI 框架头；`http.hpp` 不进入 core 编译单元。
-- [ ] MSVC x64 与 GCC/Clang 各构建一个 echo server/client（TLS on/off 各一遍）。
-- [ ] header-only 与编译模式行为一致（同一测试集）。
-- [ ] 记录编译时间/二进制大小基线；单头生成可复现。
-- [ ] Windows 链接 `ws2_32`/`crypt32` 与 `TUGMCP_TLS` 开关的说明在 README/CMake target 中可见。
-- [ ] 同一进程内所有 TU 的 `CPPHTTPLIB_OPENSSL_SUPPORT` 定义一致（TLS on/off 不混用）。
-- [ ] `transport/http.hpp` 不 include 任何第三方头；TLS/构建模式切换不改变其声明。
-- [ ] `TUGMCP_HEADER_ONLY=ON` + `TUGMCP_ENABLE_LEGACY_SSE=ON` 必须 configure 失败（`FATAL_ERROR`）。
+- [x] 两个 TU 同时 include 单头，链接无重复符号（core/HTTP/TLS 均有测试）。
+- [x] `core.hpp` 不 include cpp-httplib/GUI 框架头；`http.hpp` 不进入 core 编译单元。
+- [x] MSVC x64 构建 echo server/client（TLS on/off 各一遍）。
+- [ ] split-header `TUGMCP_HEADER_ONLY` 与编译模式行为一致（模式未实现，延后）。
+- [x] 记录编译时间/二进制大小基线；单头生成可复现（`SHA256SUMS` + `amalgamation.release`）。
+- [x] Windows 链接 `ws2_32`/`crypt32` 与 `TUGMCP_TLS` 开关的说明在 README/CMake target/发布 README 中可见。
+- [x] 同一进程内所有 TU 的 `CPPHTTPLIB_OPENSSL_SUPPORT` 定义一致（TLS on/off 不混用）。
+- [x] `transport/http.hpp` 不 include 任何第三方头；TLS/构建模式切换不改变其声明。
+- [x] `TUGMCP_HEADER_ONLY=ON` + `TUGMCP_ENABLE_LEGACY_SSE=ON` 必须 configure 失败（`FATAL_ERROR`）；当前仅 `TUGMCP_HEADER_ONLY=ON` 本身即失败。
 
 ## 8. 与宿主应用的关系
 
-- 宿主应用以静态库或 header-only 嵌入都可以；header-only 可避免 DLL ABI，但会增加宿主编译时间。
+- 宿主应用以静态库或单头 artifact 嵌入都可以；单头可避免 DLL ABI，但会增加宿主编译时间。split-header `TUGMCP_HEADER_ONLY` 模式尚未实现。
 - 如果宿主只用一个 TU 包含 HTTP 头，header-only 可行；如果多个 TU 都包含，建议用编译版 `tugmcp::http` 或只在一个 TU 定义实现。
 - 无论哪种形态，宿主的执行器/UI 调度/安全逻辑仍留在宿主。
 
 ## 9. 单头 artifact（发布用，与 `TUGMCP_HEADER_ONLY` 分离）
 
-- **源码权威**：`include/` split headers + `src/` 实现；单头只在发布时由 `tools/amalgamate.py` 生成，不手写、不提交为第二份实现。
-- **产物矩阵**：
-  - `tugmcp.hpp`：core + stdio（nlohmann/json 作为外部依赖；Threads 链接）。
-  - `tugmcp_http.hpp`：core + stdio + Streamable HTTP/SSE（cpp-httplib 外部依赖；TLS 变体按宏/单独产物；ws2_32/crypt32/OpenSSL）。
-  - schema（jsoncons/Valijson）与 legacy **不进入单头**；`TUGMCP_HEADER_ONLY + LEGACY` 继续 FATAL。
-- **消费方式**：恰好一个 TU `#define TUGMCP_IMPLEMENTATION` 后 include；其余 TU 只 include。`TUGMCP_HEADER_ONLY` CMake 模式仍不实现，单头 artifact 不依赖它。
-- **生成规则**：按公共头依赖排序；去掉项目内 include/`#pragma once`，保留第三方 include；实现段由 `src/**` 合并到 `#ifdef TUGMCP_IMPLEMENTATION`；处理匿名命名空间重名；输出确定性（无时间戳）。
-- **验收**：生成两次 SHA256 一致；双 TU ODR/链接；standalone consumer 行为测试；单头构建的 echo/fixture server 通过 MCP Inspector 与官方 conformance（2026/2025）；TLS 变体编译/链接 smoke。
-- **发布**：CI 生成到 `build/amalgamation/` 或 release 附件，附 `SHA256SUMS` 与第三方许可证说明；不进入源码树。
+> **状态**：单头 release artifacts **已支持**；split-header `TUGMCP_HEADER_ONLY` INTERFACE 模式**未实现（FATAL）**。单头消费不需要该开关。面向消费者的完整说明见 [`docs/amalgamation.md`](../docs/amalgamation.md)。
+
+- **源码权威**：`include/` split headers + `src/` 实现；单头只在发布/验证时由 `tools/amalgamate.py` 生成，不手写、不提交为第二份实现。
+- **产物矩阵（精确名称/guard）**：
+  - `tugmcp.hpp` — core + stdio，guard `TUGMCP_SINGLE_HEADER_CORE_HPP`，输出到 `build/amalgamation/tugmcp.hpp`；nlohmann/json 外部，链接 Threads。
+  - `tugmcp_http.hpp` — core + stdio + Streamable HTTP/SSE（非 TLS），guard `TUGMCP_SINGLE_HEADER_HTTP_HPP`，输出到 `build/amalgamation/tugmcp_http.hpp`；cpp-httplib 外部，Windows `ws2_32`。
+  - `tugmcp_http_tls.hpp` — 同上 + TLS，guard `TUGMCP_SINGLE_HEADER_HTTP_TLS_HPP`，输出到 `build/amalgamation/tugmcp_http_tls.hpp`；OpenSSL ≥ 3.0，Windows `ws2_32` + `crypt32`，实现段在 `<httplib.h>` 前发出 `TUGMCP_TLS_ENABLED=1` 与 `CPPHTTPLIB_OPENSSL_SUPPORT`。
+  - schema（jsoncons/Valijson）与 legacy HTTP+SSE **不进入单头**。
+- **消费方式**：恰好一个 TU `#define TUGMCP_IMPLEMENTATION` 后 include；其余 TU 只 include。`TUGMCP_HEADER_ONLY` CMake 模式未实现，单头 artifact 不依赖它。
+- **生成规则**：按公共头依赖排序；去掉项目内 include/`#pragma once`，保留第三方 include；实现段由 `src/**` 合并到 `#ifdef TUGMCP_IMPLEMENTATION`；处理匿名命名空间/文件级 static/宏重名；输出确定性（无时间戳）。
+- **打包 target**：`amalgamate` 生成三个头；`amalgamate-release` 调用 `tools/package_amalgamation.py`，默认输出 `${CMAKE_BINARY_DIR}/amalgamation/release`（`TUGMCP_AMALGAMATION_RELEASE_DIR` 可覆盖）。发布目录含三个头、`SHA256SUMS`、`NOTICE`、`README.md`、`LICENSES/{nlohmann-json-MIT.txt,cpp-httplib-MIT.txt}`；项目版本 `0.1.0`，nlohmann/json `3.12.0`，cpp-httplib `0.63.0`。重复运行逐字节一致。
+- **哈希/许可证流程**：记录哈希在 `tests/amalgamation/{core,http,http_tls}.sha256`；打包脚本默认校验生成结果与记录哈希一致。许可证从 `LICENSES/` 原样复制。`SHA256SUMS` 覆盖三个头与两份许可证文本。第三方头始终外置，不内嵌。
+- **验收覆盖**：
+  - `tests/amalgamation/run_tests.py`（`amalgamation.core`）：core 生成确定性、记录哈希、负向用例、双 TU/ODR、stdio 行为。
+  - `tests/amalgamation/run_release.py`（`amalgamation.release`）：发布文件、`SHA256SUMS`、许可证/NOTICE/README、版本串、逐字节再生成；不需要 npx。
+  - `tests/amalgamation/run_external.py`（`amalgamation.http`）：stdlib/HTTP/TLS 双 TU ODR、standalone echo/fixture server、MCP Inspector 2.12、官方 conformance（2026-07-28 121 checks / 2025-11-25 73）。`TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION=ON` 时缺工具 fail loud。
+- **发布**：CI/本地用 `amalgamate-release` 生成到 `build/amalgamation/release` 或 release 附件；不进入源码树。
 
