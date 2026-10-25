@@ -110,7 +110,31 @@ if(Python3_Interpreter_FOUND)
   set_tests_properties(amalgamation.core PROPERTIES
     LABELS amalgamation
     TIMEOUT 600
+    RUN_SERIAL TRUE
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
+  # External Inspector + conformance verification of the HTTP artifact. It
+  # generates both headers itself, so the gate is on the toolchain (Python, Node
+  # via npx, vendored HTTP dependency), not on pre-existing build outputs.
+  find_program(TUGMCP_AMALGAMATION_NPX NAMES npx npx.cmd QUIET)
+  if(TUGMCP_WITH_HTTP AND TUGMCP_AMALGAMATION_NPX)
+    add_test(NAME amalgamation.http
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/run_external.py
+        --core-out ${CMAKE_BINARY_DIR}/amalgamation/http/tugmcp.hpp
+        --http-out ${CMAKE_BINARY_DIR}/amalgamation/http/tugmcp_http.hpp
+        --core-hash ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/core.sha256
+        --http-hash ${CMAKE_CURRENT_SOURCE_DIR}/amalgamation/http.sha256
+        --json-include ${PROJECT_SOURCE_DIR}/3rd/nlohmann_json
+        --httplib-include ${PROJECT_SOURCE_DIR}/3rd/cpp-httplib
+        --build-dir ${CMAKE_CURRENT_BINARY_DIR}/amalgamation-http-build
+        --conformance-out ${CMAKE_BINARY_DIR}/amalgamation/http/conformance)
+    set_tests_properties(amalgamation.http PROPERTIES
+      LABELS amalgamation
+      TIMEOUT 1800
+      RUN_SERIAL TRUE
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  endif()
 endif()
 
 if(TUGMCP_CONFORMANCE)

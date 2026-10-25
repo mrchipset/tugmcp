@@ -58,22 +58,52 @@ class Profile(TypedDict):
     internal_headers: List[str]
     sources: List[str]
     exclusions: Dict[str, str]
+    implementation_prelude: List[str]
+    banner_notes: List[str]
 
+
+SCHEMA_EXCLUSIONS: Dict[str, str] = {
+    "include/tugmcp/schema/jsoncons.hpp":
+        "optional jsoncons schema validator; not part of single-header artifacts",
+    "include/tugmcp/schema/null.hpp":
+        "test-only schema validator; not part of single-header artifacts",
+    "include/tugmcp/schema/valijson.hpp":
+        "optional Valijson schema validator; not part of single-header artifacts",
+    "src/schema/jsoncons_validator.cpp":
+        "optional jsoncons schema validator; not part of single-header artifacts",
+    "src/schema/valijson_validator.cpp":
+        "optional Valijson schema validator; not part of single-header artifacts",
+}
+
+LEGACY_EXCLUSIONS: Dict[str, str] = {
+    "include/tugmcp/transport/legacy_sse.hpp":
+        "legacy HTTP+SSE transport; excluded from single-header artifacts",
+    "src/transport/legacy_sse.cpp":
+        "legacy HTTP+SSE transport; excluded from single-header artifacts",
+}
+
+HTTP_EXCLUSIONS: Dict[str, str] = {
+    "include/tugmcp/detail/http_httplib.hpp":
+        "HTTP implementation header; belongs to the H2 HTTP artifact",
+    "include/tugmcp/transport/http.hpp":
+        "Streamable HTTP transport; belongs to the H2 HTTP artifact",
+    "src/transport/http_security.hpp":
+        "HTTP security helpers; belong to the H2 HTTP artifact",
+    "src/transport/http_server.cpp":
+        "Streamable HTTP server; belongs to the H2 HTTP artifact",
+    "src/transport/http_client.cpp":
+        "Streamable HTTP client; belongs to the H2 HTTP artifact",
+}
 
 EXCLUSIONS: Dict[str, Dict[str, str]] = {
     "core": {
-        "include/tugmcp/detail/http_httplib.hpp":
-            "HTTP implementation header; belongs to the H2 HTTP artifact",
-        "include/tugmcp/schema/jsoncons.hpp":
-            "optional jsoncons schema validator; not part of core",
-        "include/tugmcp/schema/null.hpp":
-            "test-only schema validator; not part of core",
-        "include/tugmcp/schema/valijson.hpp":
-            "optional Valijson schema validator; not part of core",
-        "include/tugmcp/transport/http.hpp":
-            "Streamable HTTP transport; belongs to the H2 HTTP artifact",
-        "include/tugmcp/transport/legacy_sse.hpp":
-            "legacy HTTP+SSE transport; excluded from single-header artifacts",
+        **HTTP_EXCLUSIONS,
+        **SCHEMA_EXCLUSIONS,
+        **LEGACY_EXCLUSIONS,
+    },
+    "http": {
+        **SCHEMA_EXCLUSIONS,
+        **LEGACY_EXCLUSIONS,
     },
 }
 
@@ -117,6 +147,75 @@ PROFILES: Dict[str, Profile] = {
             "src/transport/stdio.cpp",
         ],
         "exclusions": EXCLUSIONS["core"],
+        "implementation_prelude": [],
+        "banner_notes": [
+            "//   * This artifact intentionally excludes HTTP/SSE, legacy transports and",
+            "//     schema validator backends.",
+        ],
+    },
+    "http": {
+        "guard": "TUGMCP_SINGLE_HEADER_HTTP_HPP",
+        "display_name": "core + stdio + Streamable HTTP/SSE",
+        "public_headers": [
+            "version.hpp",
+            "error.hpp",
+            "message.hpp",
+            "operation.hpp",
+            "resource.hpp",
+            "prompt.hpp",
+            "security.hpp",
+            "tool.hpp",
+            "request_context.hpp",
+            "time_source.hpp",
+            "transport.hpp",
+            "transport/stdio.hpp",
+            "transport/http.hpp",
+            "executor.hpp",
+            "server.hpp",
+            "client.hpp",
+            "canonical.hpp",
+            "schema.hpp",
+            "core.hpp",
+        ],
+        # detail/http_httplib.hpp is emitted once at the start of the
+        # implementation section (never hoisted into the declaration prelude).
+        "internal_headers": [
+            "include/tugmcp/detail/http_httplib.hpp",
+            "src/transport/http_security.hpp",
+            "src/core/dispatcher.hpp",
+        ],
+        "sources": [
+            "src/core/version.cpp",
+            "src/core/error.cpp",
+            "src/core/message.cpp",
+            "src/core/codec.cpp",
+            "src/core/canonical.cpp",
+            "src/core/registry.cpp",
+            "src/core/dispatcher.cpp",
+            "src/core/server.cpp",
+            "src/core/executor.cpp",
+            "src/core/client.cpp",
+            "src/core/operation.cpp",
+            "src/transport/stdio.cpp",
+            "src/transport/http_server.cpp",
+            "src/transport/http_client.cpp",
+        ],
+        "exclusions": EXCLUSIONS["http"],
+        "implementation_prelude": [
+            "// Non-TLS default for the H2 artifact. TLS is a separate H3 variant;",
+            "// consumers may override this macro, but all TUs must agree and link",
+            "// OpenSSL >= 3.0 in that case.",
+            "#ifndef TUGMCP_TLS_ENABLED",
+            "#define TUGMCP_TLS_ENABLED 0",
+            "#endif",
+        ],
+        "banner_notes": [
+            "//   * Link Threads::Threads and, on Windows, ws2_32. cpp-httplib is an",
+            "//     external dependency: put <httplib.h> on the include path.",
+            "//   * TUGMCP_TLS_ENABLED defaults to 0; TLS is a separate H3 variant.",
+            "//   * This artifact intentionally excludes legacy HTTP+SSE and schema",
+            "//     validator backends.",
+        ],
     },
 }
 
@@ -448,12 +547,12 @@ def validate_profile_completeness(
         repo_relative(path) for path in PUBLIC_ROOT.rglob("*.hpp")
     }
     expected_sources = {
-        repo_relative(path) for path in (ROOT / "src" / "core").glob("*.cpp")
+        repo_relative(path) for path in (ROOT / "src").rglob("*.cpp")
     }
-    stdio = ROOT / "src" / "transport" / "stdio.cpp"
-    if stdio.is_file():
-        expected_sources.add(repo_relative(stdio))
-    expected_all = expected_headers | expected_sources
+    expected_internal = {
+        repo_relative(path) for path in (ROOT / "src").rglob("*.hpp")
+    }
+    expected_all = expected_headers | expected_sources | expected_internal
 
     unknown_exclusions = set(exclusions) - expected_all
     if unknown_exclusions:
@@ -472,7 +571,8 @@ def validate_profile_completeness(
             f"{sorted(missing_header_inputs)}"
         )
 
-    missing_headers = expected_headers - profile_headers - set(exclusions)
+    merged_headers = profile_headers | set(profile["internal_headers"])
+    missing_headers = expected_headers - merged_headers - set(exclusions)
     if missing_headers:
         raise GenerationError(
             f"profile {profile_name}: public headers are neither merged nor "
@@ -486,6 +586,15 @@ def validate_profile_completeness(
         raise GenerationError(
             f"profile {profile_name}: sources are neither merged nor excluded: "
             f"{sorted(missing_sources)}"
+        )
+
+    missing_internal = (
+        expected_internal - set(profile["internal_headers"]) - set(exclusions)
+    )
+    if missing_internal:
+        raise GenerationError(
+            f"profile {profile_name}: internal headers are neither merged nor "
+            f"excluded: {sorted(missing_internal)}"
         )
 
     for relative in list(profile["internal_headers"]) + list(profile["sources"]):
@@ -640,11 +749,25 @@ def anonymous_top_level_text(text: str) -> str:
     return "".join(output)
 
 
+def strip_preprocessor_lines(text: str) -> str:
+    """Blank preprocessor directive lines so they do not hide declarations."""
+    output: List[str] = []
+    continuation = False
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if continuation or stripped.startswith("#"):
+            continuation = line.rstrip().endswith("\\")
+            output.append("")
+            continue
+        output.append(line)
+    return "\n".join(output)
+
+
 def scan_anonymous_names(path: Path) -> Set[str]:
     if not path.is_file():
         raise GenerationError(f"input file not found: {path}")
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    extracted = anonymous_top_level_text(text)
+    extracted = strip_preprocessor_lines(anonymous_top_level_text(text))
     names: Set[str] = set()
 
     for statement in extracted.split(";"):
@@ -721,11 +844,6 @@ def check_anonymous_collisions(entries: Sequence[Tuple[str, Path]]) -> None:
 
 def generate(profile_name: str) -> str:
     if profile_name not in PROFILES:
-        if profile_name == "http":
-            raise GenerationError(
-                "--profile http is planned for the H2 release artifact and is "
-                "not implemented yet"
-            )
         known = ", ".join(sorted(PROFILES))
         raise GenerationError(
             f"unknown profile '{profile_name}' (available: {known})"
@@ -792,8 +910,7 @@ def generate(profile_name: str) -> str:
         f"//   * nlohmann/json is an external dependency pinned at "
         f"{NLOHMANN_JSON_VERSION}; put",
         "//     <nlohmann/json.hpp> on the include path. It is not embedded.",
-        "//   * This artifact intentionally excludes HTTP/SSE, legacy transports and",
-        "//     schema validator backends.",
+        *profile["banner_notes"],
         "//",
         f"// Guard: {guard}",
         f"// Profile: {profile_name}",
@@ -817,6 +934,10 @@ def generate(profile_name: str) -> str:
             "",
         ]
     )
+    implementation_prelude = list(profile["implementation_prelude"])
+    if implementation_prelude:
+        output.extend(implementation_prelude)
+        output.append("")
     output.extend(implementation)
     output.extend(
         [

@@ -1,10 +1,17 @@
 // External conformance fixture server (Streamable HTTP only).
 
+#if defined(TUGMCP_USE_AMALGAMATION)
+// Single-header consumer mode: this TU owns the implementation and must not
+// include split-library headers or link the static library.
+#define TUGMCP_IMPLEMENTATION
+#include "tugmcp_http.hpp"
+#else
 #include <tugmcp/prompt.hpp>
 #include <tugmcp/resource.hpp>
 #include <tugmcp/server.hpp>
 #include <tugmcp/tool.hpp>
 #include <tugmcp/transport/http.hpp>
+#endif
 
 #include <chrono>
 #include <functional>

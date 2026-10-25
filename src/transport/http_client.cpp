@@ -51,8 +51,8 @@ McpError reasonError(const char* message, const char* reason) {
                         Json{{"reason", reason}});
 }
 
-Result<std::shared_ptr<ITransport>> optionFailure(const char* reason,
-                                                  std::string message) {
+Result<std::shared_ptr<ITransport>> clientOptionFailure(
+    const char* reason, std::string message) {
   return Result<std::shared_ptr<ITransport>>::failure(McpError::make(
       ErrorCode::InvalidParams, std::move(message),
       Json{{"reason", reason}}));
@@ -914,12 +914,12 @@ Result<std::shared_ptr<ITransport>> makeStreamableHttpClientTransport(
   const bool https = scheme == "https";
 #if !TUGMCP_TLS_ENABLED
   if (https) {
-    return optionFailure("unsupported_scheme",
-                         "https is not supported in this build");
+    return clientOptionFailure("unsupported_scheme",
+                               "https is not supported in this build");
   }
 #endif
   if (https != options.tls.enabled) {
-    return optionFailure(
+    return clientOptionFailure(
         "option_invalid",
         "tls.enabled must match the baseUrl scheme (https or http)");
   }
