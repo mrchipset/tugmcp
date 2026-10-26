@@ -24,6 +24,7 @@
 | [`docs/building.md`](./docs/building.md) | 前置条件、依赖策略、全部构建开关、构建/测试命令、target、测试数量与常见问题 |
 | [`docs/integration.md`](./docs/integration.md) | 三种消费方式、stdio/HTTP server 与 client 嵌入、executor/关闭、安全 hooks、schema 与部署清单 |
 | [`docs/amalgamation.md`](./docs/amalgamation.md) | 单头产物矩阵、消费/链接、TLS 宏/ODR、生成与发布、哈希/许可证策略 |
+| [`examples/qt_widgets_server/README.md`](./examples/qt_widgets_server/README.md) | Qt 5 Widgets + Streamable HTTP 示例：GUI 线程 marshal、worker 线程进度/取消、构建/运行/测试说明 |
 | [`docs/roadmap.md`](./docs/roadmap.md) | 里程碑完成度、设计章节落地状态与下一步优先级 |
 
 ## 目标布局
@@ -102,6 +103,7 @@ cmake --build build --target amalgamate-release  # 生成并打包 build/amalgam
 | `TUGMCP_BUILD_TESTS` | ON | 构建测试 target |
 | `TUGMCP_HEADER_ONLY` | OFF | **未实现**：split-header INTERFACE 模式 ON 即 FATAL；单头产物不依赖此开关 |
 | `TUGMCP_BUILD_EXAMPLES` | ON | 构建 `examples/`（`tugmcp_echo_server` 等） |
+| `TUGMCP_BUILD_QT_EXAMPLE` | OFF | 构建 Qt 5 Widgets 示例（`examples/qt_widgets_server`）；需 `TUGMCP_WITH_HTTP=ON` 与 Qt5 Widgets（`CMAKE_PREFIX_PATH`） |
 | `TUGMCP_CONFORMANCE` | OFF | 运行外部 conformance 套件（需 Python3、npx/Node、HTTP 与测试；构建 `tugmcp_conformance_server`） |
 | `TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION` | ON | 单头外部 Inspector/conformance 测试缺工具时仍注册并 fail loud；OFF 才跳过 |
 | `TUGMCP_AMALGAMATION_RELEASE_DIR` | `${CMAKE_BINARY_DIR}/amalgamation/release` | `amalgamate-release` 输出目录 |

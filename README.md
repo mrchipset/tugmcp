@@ -24,6 +24,7 @@ The name “tugboat” reflects its role: the library does not implement busines
 | [`docs/building.md`](./docs/building.md) | Prerequisites, dependency policy, all build switches, build/test commands, targets, test counts, troubleshooting |
 | [`docs/integration.md`](./docs/integration.md) | Three consumption modes, stdio/HTTP server and client embedding, executor/shutdown, security hooks, schema, deployment checklist |
 | [`docs/amalgamation.md`](./docs/amalgamation.md) | Single-header artifact matrix, consumption/linking, TLS macros/ODR, generation and release, hashes/license policy |
+| [`examples/qt_widgets_server/README.md`](./examples/qt_widgets_server/README.md) | Qt 5 Widgets + Streamable HTTP example: GUI-thread marshalling, worker-thread progress/cancellation, build/run/test commands |
 | [`docs/roadmap.md`](./docs/roadmap.md) | Milestone completion, design-section status, and next priorities |
 
 ## Project layout
@@ -102,6 +103,7 @@ Implementation history and milestones are described in `designs/mcp-library-desi
 | `TUGMCP_BUILD_TESTS` | ON | Build test targets |
 | `TUGMCP_HEADER_ONLY` | OFF | **Unimplemented**: split-header INTERFACE mode; `ON` is FATAL. Single-header artifacts do not use it |
 | `TUGMCP_BUILD_EXAMPLES` | ON | Build `examples/` (`tugmcp_echo_server`, etc.) |
+| `TUGMCP_BUILD_QT_EXAMPLE` | OFF | Build the Qt 5 Widgets example (`examples/qt_widgets_server`); requires `TUGMCP_WITH_HTTP=ON` and Qt5 Widgets (`CMAKE_PREFIX_PATH`) |
 | `TUGMCP_CONFORMANCE` | OFF | Run the external conformance suite (requires Python3, npx/Node, HTTP and tests; builds `tugmcp_conformance_server`) |
 | `TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION` | ON | Keep single-header Inspector/conformance tests registered and fail loudly when tools are missing; `OFF` skips them |
 | `TUGMCP_AMALGAMATION_RELEASE_DIR` | `${CMAKE_BINARY_DIR}/amalgamation/release` | Output directory for `amalgamate-release` |

@@ -37,6 +37,7 @@
 |---|---|---|---|
 | `TUGMCP_BUILD_TESTS` | `ON` | 生成测试可执行文件并 `enable_testing()` | 测试可执行文件始终编译，不会“按需跳过” |
 | `TUGMCP_BUILD_EXAMPLES` | `ON` | 构建 `examples/` | 生成 `tugmcp_echo_server`；HTTP 开启时再生成 `tugmcp_echo_client` |
+| `TUGMCP_BUILD_QT_EXAMPLE` | `OFF` | 构建 Qt 5 Widgets 示例（`examples/qt_widgets_server`） | 需 `TUGMCP_WITH_HTTP=ON`、`TUGMCP_BUILD_EXAMPLES=ON` 与 Qt5 Widgets；用 `-DCMAKE_PREFIX_PATH=C:/Qt/5.15.2/msvc2019_64` 指定 Qt |
 | `TUGMCP_WITH_HTTP` | `ON` | 构建 `tugmcp::http`（Streamable HTTP/SSE） | legacy 与 conformance 依赖它 |
 | `TUGMCP_TLS` | `OFF` | 启用 TLS（cpp-httplib + OpenSSL） | 需要 `TUGMCP_WITH_HTTP=ON` 且 OpenSSL ≥ 3.0 |
 | `TUGMCP_TLS_BACKEND` | `openssl` | TLS 后端 | 当前只接受 `openssl`；其他值 configure 即 `FATAL_ERROR` |

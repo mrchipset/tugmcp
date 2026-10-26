@@ -193,6 +193,7 @@ ctest --test-dir build -L conformance
 | `TUGMCP_ENABLE_LEGACY_SSE` | OFF；启用 legacy HTTP+SSE 适配 |
 | `TUGMCP_HEADER_ONLY` | OFF；**未实现**：split-header INTERFACE 模式尚未实现，ON 即 `FATAL_ERROR`；单头发布产物不依赖此开关 |
 | `TUGMCP_BUILD_EXAMPLES` | ON；构建 `examples/`（`tugmcp_echo_server` 等） |
+| `TUGMCP_BUILD_QT_EXAMPLE` | OFF；构建 Qt 5 Widgets 示例（`examples/qt_widgets_server`），需 `TUGMCP_WITH_HTTP=ON`、`TUGMCP_BUILD_EXAMPLES=ON` 与 Qt5 Widgets（`CMAKE_PREFIX_PATH`） |
 | `TUGMCP_CONFORMANCE` | OFF；运行外部 conformance 套件（需 Python3、`TUGMCP_WITH_HTTP=ON`、`TUGMCP_BUILD_TESTS=ON`、`TUGMCP_BUILD_EXAMPLES=ON` 且存在 `tugmcp_echo_server`） |
 | `TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION` | ON；单头外部 Inspector/conformance 测试缺失前置条件时仍注册并 fail loud；OFF 才显式跳过 |
 | `TUGMCP_AMALGAMATION_RELEASE_DIR` | `${CMAKE_BINARY_DIR}/amalgamation/release`；`amalgamate-release` 的输出目录 |
