@@ -32,6 +32,9 @@ Thumbs.db
 # Deepwork local state
 .slim/deepwork/
 
+# Local opencode state (skills are also mirrored in skills/)
+.opencode/
+
 # Python bytecode
 __pycache__/
 *.pyc
