@@ -5,6 +5,10 @@ description: tugmcp Streamable HTTP 功能开发指南。Use when changing or ex
 
 # tugmcp Streamable HTTP 开发
 
+> Bundle 路径约定：`bundle/...` 相对 `skills/` 根（仓库内即
+> `skills/bundle/...`）。在仓库内优先读原文件；发布到仓库外时以 bundle
+> 快照为准。
+
 ## 0. 适用范围
 
 覆盖 `tugmcp::http`（Streamable HTTP server/client、SSE、2025 session、TLS、
@@ -22,7 +26,7 @@ legacy adapter）的源码、公共头与单头产物。
 | `designs/mcp-library-design.md` | HTTP 分层、生命周期、关闭顺序 |
 | `docs/api.md` §7.3、§11.6 | `StreamableHttpServerOptions` / `ClientOptions`、HTTP 状态映射 |
 | `docs/integration.md` §5–§6、§11–§12 | 宿主接入、线程/关闭、部署边界、已知限制 |
-| `designs/testing.md` + `tests/CMakeLists.txt` | 测试分层；实际 target/label 以 CMake 为准 |
+| `designs/testing.md` + `tests/CMakeLists.txt`（发布快照 `bundle/tests/CMakeLists.txt`） | 测试分层；实际 target/label 以 CMake 为准 |
 | `docs/conformance-report.md` | 外部 Inspector/conformance 证据与偏差处理 |
 
 改 wire 行为（header、`_meta`、状态码、session、SSE 事件）时，**先改
@@ -41,7 +45,7 @@ legacy adapter）的源码、公共头与单头产物。
 | `include/tugmcp/detail/http_httplib.hpp` | **唯一** cpp-httplib include 点；检查 `TUGMCP_TLS_ENABLED` 与 `CPPHTTPLIB_OPENSSL_SUPPORT` 一致 |
 | `src/core/dispatcher.cpp` | MCP method 语义、MRTR、auth/authorization/approval/audit；**不要**把 method 语义搬进 transport |
 | `tests/integration/http_*.cpp` | HTTP 行为的事实规格；改行为先看这些用例 |
-| `CMakeLists.txt`（根） | `tugmcp_http` target：PUBLIC core、PRIVATE httplib、Windows `ws2_32`、TLS OpenSSL/`crypt32` |
+| `CMakeLists.txt`（根；发布快照 `bundle/CMakeLists.txt`） | `tugmcp_http` target：PUBLIC core、PRIVATE httplib、Windows `ws2_32`、TLS OpenSSL/`crypt32` |
 
 ## 3. 不可破坏的边界
 
@@ -124,7 +128,8 @@ legacy adapter）的源码、公共头与单头产物。
      close/pending 清理。
 4. **测试**：按 `tugmcp-http-testing` 增加 raw HTTP + loopback + 失败路径。
 5. **单头**：`cmake --build build --target amalgamate`；若是有意变更，更新
-   `tests/amalgamation/http.sha256`（TLS 改 `http_tls.sha256`），再跑
+   `tests/amalgamation/http.sha256`（发布快照
+   `bundle/tests/amalgamation/http.sha256`；TLS 改 `http_tls.sha256`），再跑
    `ctest -L amalgamation`。
 6. **文档**：更新 `docs/api.md` / `docs/integration.md` / `docs/building.md`
    中受影响的段落；不要只改代码。

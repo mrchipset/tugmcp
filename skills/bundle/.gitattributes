@@ -1,0 +1,2 @@
+# Keep bundle snapshots byte-stable across Windows/Linux checkouts.
+* text eol=lf

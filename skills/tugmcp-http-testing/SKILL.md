@@ -5,6 +5,10 @@ description: tugmcp Streamable HTTP 测试指南。Use when adding or running HT
 
 # tugmcp Streamable HTTP 测试
 
+> Bundle 路径约定：`bundle/...` 相对 `skills/` 根（仓库内即
+> `skills/bundle/...`）。在仓库内优先读原文件；发布到仓库外时以 bundle
+> 快照为准。
+
 ## 0. 测试分层（以当前 CMake 为准）
 
 | Label | Target | 内容 |
@@ -16,10 +20,24 @@ description: tugmcp Streamable HTTP 测试指南。Use when adding or running HT
 
 - HTTP 测试全部编入 `tugmcp_integration_tests`；当前**没有**单独的 `tls` /
   `slow` / `win-only` CTest label（`designs/testing.md` 里的部分 target 是
-  规划，实际见 `tests/CMakeLists.txt`）。
+  规划，实际见 `tests/CMakeLists.txt`；发布快照
+  `bundle/tests/CMakeLists.txt`）。
 - TLS 用例以 `TLS` 开头；legacy 用例以 `legacy SSE` 开头；其余以
   `integration.` 为 CTest 前缀。
 - 默认 Debug 基线：267 个测试。用 `ctest -N` 核对当前数量，不要硬编码。
+
+### 0.1 Bundle 配置对应表
+
+| 需要核对的内容 | Bundle 快照 |
+|---|---|
+| 测试 target/label/timeout | `bundle/tests/CMakeLists.txt` |
+| 根 target 与构建开关 | `bundle/CMakeLists.txt` |
+| doctest 接入 | `bundle/cmake/doctest.cmake` |
+| 3rd hash 校验 | `bundle/cmake/verify_hashes.cmake` |
+| amalgamation manifest 校验 | `bundle/cmake/verify_manifest.cmake` |
+| 单头测试与外部 gating | `bundle/tests/amalgamation/CMakeLists.txt`、`bundle/tests/amalgamation/require_external.cmake` |
+| conformance 已知失败账本 | `bundle/tests/conformance/expected_failures.yaml` |
+| 单头 hash | `bundle/tests/amalgamation/{core,http,http_tls}.sha256` |
 
 ## 1. HTTP 测试地图
 
@@ -133,7 +151,8 @@ ctest --test-dir build -C Debug -L amalgamation --output-on-failure
 
 ### 3.1 注册位置
 
-- 新 `.cpp` 加到 `tests/CMakeLists.txt` 的 `if(TUGMCP_WITH_HTTP)` 下的
+- 新 `.cpp` 加到 `tests/CMakeLists.txt`（发布快照
+  `bundle/tests/CMakeLists.txt`）的 `if(TUGMCP_WITH_HTTP)` 下的
   `target_sources(tugmcp_integration_tests PRIVATE ...)`。
 - TLS 用例放 `tls_loopback_test.cpp` 或新增到 TLS 分支；legacy 放
   `legacy_sse_test.cpp`。
@@ -216,7 +235,8 @@ CHECK(response->status == 200);
   `tests/conformance/fixture_server.cpp` 构建的 `tugmcp_conformance_server`，
   不是生产 echo example。
 - 2026 required 121、2025 required 73；要求 0 failure / 0 unexpected skip。
-- `tests/conformance/expected_failures.yaml` 只登记**已知且已解释**的未计分项。
+- `bundle/tests/conformance/expected_failures.yaml`（仓库源：
+  `tests/conformance/expected_failures.yaml`）只登记**已知且已解释**的未计分项。
   已登记项重新通过 → runner 失败；未登记失败 → 失败。不要用它隐藏回归。
 - fixture server（`tests/conformance/fixture_server.cpp`）只用于测试，不是
   生产 example；不要用 `tugmcp_echo_server` 代替。
@@ -230,7 +250,8 @@ CHECK(response->status == 200);
 - 有意改公共头/HTTP 实现后：
   1. `cmake --build build --target amalgamate`
   2. 用 `tools/amalgamate.py --profile http --check ...` 或测试输出里的新
-     hash 更新 `tests/amalgamation/http.sha256`（TLS 改 `http_tls.sha256`）
+     hash 更新 `bundle/tests/amalgamation/http.sha256`（仓库源：
+     `tests/amalgamation/http.sha256`；TLS 改 `http_tls.sha256`）
   3. 重跑 `ctest -L amalgamation`
 - `TUGMCP_REQUIRE_EXTERNAL_AMALGAMATION` 默认 ON：缺 Python/npx/Node/OpenSSL
   时测试仍注册并 **fail loud**。只有明确要跳过时才设为 OFF，并记录原因。
@@ -247,7 +268,7 @@ CHECK(response->status == 200);
 
 - `sleep_for` 同步、固定端口、访问外部网络/DNS。
 - 只测 happy path，不测 400/401/403/404/405/413/415/429/504。
-- 用 `expected_failures.yaml` 或跳过测试来“变绿”。
+- 用 `bundle/tests/conformance/expected_failures.yaml` 或跳过测试来“变绿”。
 - 失败重试而不是修根因；flaky 测试直接删。
 - 在测试里复用全局可变状态；每个测试独立 scope、独立 server。
 - 把 conformance fixture 当生产代码。
@@ -259,5 +280,5 @@ CHECK(response->status == 200);
 - [ ] 2026 与 2025 分支分别覆盖（如改动跨代）。
 - [ ] `ctest -L integration` 通过；TLS/legacy 构建分别通过（如适用）。
 - [ ] `ctest -L amalgamation` 通过；hash 已更新（如公共头变化）。
-- [ ] conformance 未新增未登记失败；`expected_failures.yaml` 未被滥用。
+- [ ] conformance 未新增未登记失败；`bundle/tests/conformance/expected_failures.yaml` 未被滥用。
 - [ ] 测试无 `sleep_for`、固定端口、外部网络依赖。

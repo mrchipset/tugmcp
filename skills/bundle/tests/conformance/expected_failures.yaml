@@ -1,0 +1,4 @@
+# Expected conformance failures. Keep empty unless a check is a genuine
+# deferred item (for example P4 list_changed work). Any listed check that
+# starts passing will fail the runner.
+[]

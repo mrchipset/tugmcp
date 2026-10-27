@@ -5,6 +5,10 @@ description: tugmcp Streamable HTTP 调试指南。Use when HTTP tests fail, con
 
 # tugmcp Streamable HTTP 调试
 
+> Bundle 路径约定：`bundle/...` 相对 `skills/` 根（仓库内即
+> `skills/bundle/...`）。在仓库内优先读原文件；发布到仓库外时以 bundle
+> 快照为准。
+
 ## 0. 先分类，再改代码
 
 | 现象 | 优先怀疑的层 | 第一动作 |
@@ -322,7 +326,8 @@ host。TLS 需要 OpenSSL ≥ 3.0，且所有 TU 的 TLS 宏一致。
 
 ## 8. 不要做
 
-- 不要把新失败加进 `expected_failures.yaml` 来“变绿”；该文件只登记已知、
+- 不要把新失败加进 `bundle/tests/conformance/expected_failures.yaml`（仓库源：
+  `tests/conformance/expected_failures.yaml`）来“变绿”；该文件只登记已知、
   已解释的未计分项。
 - 不要用 catch-all 500 掩盖 4xx；状态码是 wire 契约。
 - 不要用 `sleep_for` 同步 server/client；用 ready signal 或 ctest 超时。
